@@ -36,6 +36,23 @@ def build_workload(requests, max_tokens=64, *, kind="uniform", seed=42):
     return [{"prompt": prompts[label], "max_tokens": budgets[label], "class": label} for label in labels]
 
 
+def build_stress_workload(requests, *, prompt_repeats=32, output_tokens=64):
+    """Build controlled context/output plans; actual tokenizer counts come from the server."""
+    if type(requests) is not int or not 1 <= requests <= 100000:
+        raise ValueError("requests must be in 1..100000")
+    if type(prompt_repeats) is not int or not 1 <= prompt_repeats <= 256:
+        raise ValueError("prompt_repeats must be in 1..256")
+    if type(output_tokens) is not int or not 1 <= output_tokens <= 256:
+        raise ValueError("output_tokens must be in 1..256")
+    observation = "GPU inference needs bounded memory and predictable recovery. "
+    prompt = "Summarize these observations without adding facts:\n" + observation * prompt_repeats
+    if len(prompt.encode()) > 16384:
+        raise ValueError("constructed prompt exceeds service byte limit")
+    label = f"context-r{prompt_repeats}-out{output_tokens}"
+    return [{"prompt": prompt, "max_tokens": output_tokens, "class": label}
+            for _ in range(requests)]
+
+
 def validate_workload(plan, *, max_requests=100000):
     if not isinstance(plan, list) or not 1 <= len(plan) <= max_requests:
         raise ValueError(f"workload must contain 1..{max_requests} request objects")

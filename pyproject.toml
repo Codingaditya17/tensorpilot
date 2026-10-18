@@ -22,6 +22,9 @@ tensorpilot-compare = "tensorpilot.compare:main"
 tensorpilot-bench = "tensorpilot.bench:main"
 tensorpilot-recover = "tensorpilot.journal:main"
 tensorpilot-profile = "tensorpilot.profile:main"
+tensorpilot-soak = "tensorpilot.soak:main"
+tensorpilot-correctness = "tensorpilot.correctness:main"
+tensorpilot-supervisor = "tensorpilot.supervisor:main"
 
 [tool.setuptools.dynamic]
 version = {attr = "tensorpilot.__version__"}

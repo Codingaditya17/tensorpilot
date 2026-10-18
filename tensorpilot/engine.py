@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from .scheduler import Scheduler
+from .admission import ResourceAdmission
 
 LOGGER = logging.getLogger(__name__)
 TERMINAL_STATES = frozenset(("completed", "cancelled", "timed_out", "failed"))
@@ -44,6 +45,8 @@ class Job:
     state: str = "queued"
     schedule_reason: str | None = None
     expiry_task: asyncio.Task | None = field(default=None, repr=False)
+    resource_estimate: object | None = field(default=None, repr=False)
+    reservation_released: bool = field(default=False, repr=False)
 
 
 def advance(iterator):
@@ -56,11 +59,12 @@ class Engine:
     max_active_sequences = 1
 
     def __init__(self, factory, queue_size=8, metrics=None, *, scheduler="fifo", max_queue_wait_s=1.0,
-                 stall_timeout_s=30.0):
+                 stall_timeout_s=30.0, admission=None):
         if not math.isfinite(stall_timeout_s) or stall_timeout_s <= 0:
             raise ValueError("stall_timeout_s must be finite and positive")
         self.factory = factory
         self.metrics = metrics
+        self.admission = admission or ResourceAdmission()
         self.queue = Scheduler(queue_size, scheduler, max_queue_wait_s)
         self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tensorpilot-mlx")
         self.closing = False
@@ -72,6 +76,7 @@ class Engine:
         self.worker = None
         self.watchdog = None
         self.last_memory_sample_s = None
+        self.last_memory_sample = None
         self._close_task = None
 
     @property
@@ -108,6 +113,7 @@ class Engine:
 
     def _observe_memory(self, sample):
         self.last_memory_sample_s = time.perf_counter()
+        self.last_memory_sample = dict(sample)
         if self.metrics:
             self.metrics.update_memory(sample)
 
@@ -141,21 +147,36 @@ class Engine:
         if not self.ready:
             if self.metrics:
                 self.metrics.rejected.inc()
+                self.metrics.admission_decisions.labels(decision="unavailable").inc()
             raise Overloaded("inference worker unavailable")
         now = time.perf_counter()
         job = Job(prompt, max_tokens, now + timeout_s, admitted=now)
         if request_id:
             job.request_id = request_id
+        job.resource_estimate = self.admission.estimate(prompt, max_tokens)
+        if not self.admission.reserve(job.resource_estimate):
+            if self.metrics:
+                self.metrics.rejected.inc()
+                self.metrics.admission_decisions.labels(decision="memory_pressure").inc()
+            raise Overloaded("estimated KV-cache admission budget exhausted")
         try:
             self.queue.put_nowait(job)
         except asyncio.QueueFull as exc:
+            self._release_reservation(job)
             if self.metrics:
                 self.metrics.rejected.inc()
+                self.metrics.admission_decisions.labels(decision="queue_full").inc()
             raise Overloaded("request queue full") from exc
         job.expiry_task = asyncio.create_task(self._expire_waiting(job), name="tensorpilot-queue-deadline")
         if self.metrics:
             self.metrics.admitted.inc()
+            self.metrics.admission_decisions.labels(decision="accepted").inc()
         return job
+
+    def _release_reservation(self, job):
+        if job.resource_estimate is not None and not job.reservation_released:
+            self.admission.release(job.resource_estimate)
+            job.reservation_released = True
 
     async def _expire_waiting(self, job):
         await asyncio.sleep(max(0, job.deadline - time.perf_counter()))
@@ -170,6 +191,7 @@ class Engine:
             job.expiry_task = None
 
     def _record_outcome(self, job, outcome):
+        self._release_reservation(job)
         job.state = outcome
         if self.metrics:
             self.metrics.outcomes.labels(outcome=outcome).inc()

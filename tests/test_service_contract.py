@@ -8,6 +8,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from tensorpilot.client import Client, TensorPilotError
 from tensorpilot.server import ENGINE, create_app
+from tensorpilot.correctness import record, verify
 from test_serving import FakeBackend
 
 
@@ -17,6 +18,8 @@ def test_auth_probes_and_request_ids():
             for path in ("/livez", "/readyz"):
                 async with http.get(path) as response:
                     assert response.status == 200
+            async with http.get("/") as response:
+                assert response.status == 200
             for path in ("/metrics", "/v1/model", "/health"):
                 async with http.get(path) as response:
                     assert response.status == 401
@@ -32,6 +35,19 @@ def test_auth_probes_and_request_ids():
                 assert len(ids) == 1
                 assert len(next(iter(ids))) == 32
                 assert events[-1]["type"] == "done"
+    asyncio.run(scenario())
+
+
+def test_browser_dashboard_is_served_and_contains_safe_local_console():
+    async def scenario():
+        async with TestClient(TestServer(create_app(FakeBackend, warmup=False))) as http:
+            async with http.get("/") as response:
+                assert response.status == 200
+                assert response.content_type == "text/html"
+                assert "TensorPilot" in await response.text()
+                assert "Content-Security-Policy" in response.headers
+            async with http.get("/favicon.ico") as response:
+                assert response.status == 404
     asyncio.run(scenario())
 
 
@@ -130,6 +146,24 @@ def test_sdk_detects_truncated_stream():
                 with pytest.raises(TensorPilotError) as failure:
                     _ = [event async for event in client.stream("hi")]
                 assert failure.value.code == "incomplete_stream"
+    asyncio.run(scenario())
+
+
+def test_token_reference_record_and_exact_verification():
+    async def scenario():
+        metadata = {"artifact_sha256": "artifact", "model_revision": "revision",
+                    "sampling": "greedy", "prompt_format": "raw"}
+        async with TestClient(TestServer(create_app(FakeBackend, metadata=metadata, warmup=False))) as http:
+            url = str(http.make_url("/")).rstrip("/")
+            cases = ({"name": "fake", "prompt": "hello", "max_tokens": 3},)
+            reference = await record(url, cases)
+            result = await verify(url, reference)
+            assert result["passed"]
+            reference["cases"][0]["token_ids_including_eos"][0] = 999
+            assert not (await verify(url, reference))["passed"]
+            reference["server"]["artifact_sha256"] = "wrong"
+            with pytest.raises(ValueError, match="artifact_sha256"):
+                await verify(url, reference)
     asyncio.run(scenario())
 
 

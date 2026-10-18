@@ -17,13 +17,17 @@
 - [x] Characterize aging thresholds with mixed real MLX workloads.
 - [x] Publish the measured latency/fairness tradeoff with per-class results.
 - [x] Verify package installation in an isolated CPU-only environment.
+- [x] Add deterministic KV-estimate admission with measured-memory separation.
+- [x] Add guarded 15/30/60-minute stress configurations and controlled workloads.
+- [x] Add readiness-gated restart supervision and validate a real worker crash.
+- [x] Pin deterministic token IDs and verify serial/batch equality on the real model.
 
 ## Next runtime depth
 
 - [x] Recoverable journals and bounded task/record soak testing.
 - [x] Real cache-array profiling and allocator sample-age metrics.
 - [x] Worker progress watchdog and explicit degraded-state health semantics.
-- [ ] Context/memory admission based on measured backend resource information.
+- [x] Conservative cache-reservation admission calibrated separately from allocator measurements.
 - [x] Shared SDK/load stream protocol conformance.
 - [ ] Broader backend conformance and pinned quality evaluation set.
 - [x] Opt-in real MLX continuous batching with independent sequence state,

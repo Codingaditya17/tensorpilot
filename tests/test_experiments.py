@@ -12,7 +12,7 @@ from tensorpilot.compare import compare_reports, regression_gate
 from tensorpilot.experiment import ensure_port_free, run_order
 from tensorpilot.load import run
 from tensorpilot.reporting import write_json
-from tensorpilot.workloads import build_workload, fingerprint, validate_workload
+from tensorpilot.workloads import build_stress_workload, build_workload, fingerprint, validate_workload
 
 
 def test_mixed_plan_is_seeded_with_fixed_composition():
@@ -24,6 +24,16 @@ def test_mixed_plan_is_seeded_with_fixed_composition():
     assert sum(item["class"] == "short" for item in first) == 18
     assert {item["max_tokens"] for item in first} == {16, 64, 128}
     validate_workload(first)
+
+
+def test_stress_workload_has_controlled_context_and_output_shape():
+    plan = build_stress_workload(3, prompt_repeats=8, output_tokens=32)
+    assert len(plan) == 3
+    assert {item["max_tokens"] for item in plan} == {32}
+    assert {item["class"] for item in plan} == {"context-r8-out32"}
+    validate_workload(plan)
+    with pytest.raises(ValueError):
+        build_stress_workload(1, prompt_repeats=1000)
 
 
 @pytest.mark.parametrize("plan", [[], [{}], [{"prompt": "hi", "max_tokens": True, "class": "x"}],

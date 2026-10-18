@@ -1,19 +1,21 @@
 # Current engineering state
 
-TensorPilot v0.4.0 adds opt-in real MLX continuous batching. Serial/FIFO default.
-95 source tests pass; Ruff clean. See WORK_LOG.md and docs/batching-design.md.
+TensorPilot v0.5.0 runtime hardening is active on branch
+`codex/runtime-platform`. A supervised serial/FIFO service exposes the dashboard
+at `http://127.0.0.1:8080/`; batching remains opt-in.
 
-Real evidence: adapter token equality, HTTP cancellation/overload/recovery, and
-three 30-request runs per mode: 180 successful, zero failures/rejections. Batch
-width two: +56.2% throughput, -37.7% P95 on this model/workload. Full evidence
-under results/batch_execution_seed42 and results/batch_http_validation.json.
+Implemented: browser dashboard, conservative KV reservation admission, separate
+estimated/actual memory telemetry, guarded soak presets, configurable stress
+workloads, pinned token-ID correctness, and readiness-gated bounded worker
+restart. The last complete suite passed 104 tests with Ruff clean.
 
-Earlier v0.3 release exports remain unchanged. Current exports are separate.
-Nothing remotely published. Before a new experiment stop the local server so
-one process owns the model/GPU at a time. Remaining work: larger contexts, wider
-batches, sustained batch memory testing, quality evaluation, process supervision,
-resource-aware admission and tenant isolation.
+Real evidence: serial/batch IDs matched for three pinned cases; constrained
+admission accepted one and rejected five without leaks; a SIGKILLed worker was
+restarted and served recovery traffic. The final in-flight crash produced an
+explicit transport error, a new ready instance and a successful next request.
+The 15-minute soak completed 3,650/3,650 requests with all 180 samples ready.
+See docs/v05-runtime-hardening.md and WORK_LOG.md.
 
-Final wheel: 95 CPU-only tests passed outside checkout. Local server restored
-to serial/FIFO, 127.0.0.1:8080, queue 8, memory limit 6 GiB. Runtime log
-results/runtime_v04_serial.log. Batch soak: 288 successful, zero failures/rejections.
+Nothing is pushed or published. Prior release/evidence archives remain intact.
+The v0.5 wheel passed 104 tests outside the checkout without MLX. Remaining:
+record final checksums, package evidence and create a local Git checkpoint.

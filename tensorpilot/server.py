@@ -22,6 +22,8 @@ from .batch_engine import BatchEngine
 from .environment import source_fingerprint, dependency_versions
 from .metrics import Metrics
 from .scheduler import Scheduler
+from .ui import DASHBOARD_HTML
+from .admission import ResourceAdmission
 
 ENGINE = web.AppKey("engine", Engine)
 METRICS = web.AppKey("metrics", Metrics)
@@ -33,9 +35,11 @@ REQUEST_ID = web.RequestKey("request_id", str) if hasattr(web, "RequestKey") els
 def create_app(factory, *, queue_size=8, max_tokens=256, max_timeout=120,
                warmup=True, metadata=None, api_key=None, scheduler="fifo", max_queue_wait_s=1.0,
                instance_id=None, stall_timeout_s=30.0, execution="serial", batch_size=2,
-               prefill_step_size=256, batch_adapter_factory=None):
+               prefill_step_size=256, batch_adapter_factory=None,
+               admission_memory_bytes=512 * 1024**2, admission_bytes_per_token=16 * 1024):
     metrics = Metrics()
-    options = {"metrics": metrics, "scheduler": scheduler,
+    admission = ResourceAdmission(admission_memory_bytes, bytes_per_token=admission_bytes_per_token)
+    options = {"metrics": metrics, "scheduler": scheduler, "admission": admission,
                "max_queue_wait_s": max_queue_wait_s, "stall_timeout_s": stall_timeout_s}
     if execution == "batch":
         options.update(max_batch_size=batch_size, prefill_step_size=prefill_step_size)
@@ -65,7 +69,9 @@ def create_app(factory, *, queue_size=8, max_tokens=256, max_timeout=120,
         started = time.perf_counter()
         status = 500
         try:
-            protected = request.path not in ("/livez", "/readyz")
+            # The dashboard shell is public so an operator can enter a key in it;
+            # data/model/generation endpoints remain protected.
+            protected = request.path not in ("/", "/livez", "/readyz")
             supplied = request.headers.get("Authorization", "")
             if api_key and protected and not hmac.compare_digest(supplied.encode(), ("Bearer " + api_key).encode()):
                 response = error(request, 401, "unauthorized", "A valid bearer token is required",
@@ -117,6 +123,11 @@ def create_app(factory, *, queue_size=8, max_tokens=256, max_timeout=120,
     async def livez(request):
         return web.json_response({"alive": True})
 
+    async def dashboard(request):
+        return web.Response(text=DASHBOARD_HTML, content_type="text/html",
+                            headers={"Cache-Control": "no-store",
+                                     "Content-Security-Policy": "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; object-src 'none'; base-uri 'none'"})
+
     async def readyz(request):
         available = ready()
         return web.json_response({"ready": available, "reason": engine.unhealthy_reason}, status=200 if available else 503)
@@ -126,7 +137,12 @@ def create_app(factory, *, queue_size=8, max_tokens=256, max_timeout=120,
                                   "unhealthy_reason": engine.unhealthy_reason,
                                   "active": engine.active is not None,
                                   "active_sequences": engine.active_count,
-                                  "execution_concurrency": engine.max_active_sequences, **service_metadata})
+                                  "execution_concurrency": engine.max_active_sequences,
+                                  "admission": engine.admission.snapshot(),
+                                  "last_measured_memory": engine.last_memory_sample,
+                                  "memory_sample_age_s": (time.perf_counter() - engine.last_memory_sample_s
+                                                          if engine.last_memory_sample_s is not None else None),
+                                  **service_metadata})
 
     async def model_info(request):
         return web.json_response({"api_version": "v1", "execution_concurrency": engine.max_active_sequences,
@@ -184,6 +200,7 @@ def create_app(factory, *, queue_size=8, max_tokens=256, max_timeout=120,
 
     app.cleanup_ctx.append(lifecycle)
     app.on_shutdown.append(shutdown)
+    app.router.add_get("/", dashboard)
     app.router.add_get("/livez", livez)
     app.router.add_get("/readyz", readyz)
     app.router.add_get("/health", health)
@@ -209,6 +226,10 @@ def main():
     parser.add_argument("--batch-size", type=int, default=2, help="maximum active batch sequences (1..8)")
     parser.add_argument("--prefill-step-size", type=int, default=256, help="batch prefill segmentation (1..2048)")
     parser.add_argument("--memory-gib", type=float, default=6)
+    parser.add_argument("--admission-memory-mib", type=int, default=512,
+                        help="estimated KV reservation budget; separate from measured MLX memory")
+    parser.add_argument("--admission-bytes-per-token", type=int, default=16 * 1024,
+                        help="conservative KV estimate coefficient, not a measurement")
     parser.add_argument("--scheduler", choices=Scheduler.POLICIES, default="fifo")
     parser.add_argument("--max-queue-wait", type=float, default=1.0,
                         help="aging override threshold in seconds; never preempts active inference")
@@ -217,6 +238,8 @@ def main():
     args = parser.parse_args()
     if args.queue_size < 1 or not 0 < args.memory_gib <= 8:
         parser.error("queue-size must be positive; memory-gib must be in (0, 8]")
+    if args.admission_memory_mib < 1 or args.admission_bytes_per_token < 1:
+        parser.error("admission memory and bytes-per-token must be positive")
     if not math.isfinite(args.max_queue_wait) or args.max_queue_wait <= 0:
         parser.error("max-queue-wait must be finite and positive")
     if not math.isfinite(args.stall_timeout) or args.stall_timeout <= 0:
@@ -244,7 +267,9 @@ def main():
                      scheduler=args.scheduler, max_queue_wait_s=args.max_queue_wait,
                      instance_id=args.instance_id, stall_timeout_s=args.stall_timeout,
                      execution=args.execution, batch_size=args.batch_size,
-                     prefill_step_size=args.prefill_step_size)
+                     prefill_step_size=args.prefill_step_size,
+                     admission_memory_bytes=args.admission_memory_mib * 1024**2,
+                     admission_bytes_per_token=args.admission_bytes_per_token)
     web.run_app(app, host=args.host, port=args.port, handler_cancellation=True, access_log=None)
 
 

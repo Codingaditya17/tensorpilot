@@ -206,3 +206,29 @@ below after rebuild. This short soak does not establish long-term memory bounds.
 Final v0.4 wheel rebuilt and installed outside the checkout: all 95 tests passed
 in the isolated CPU environment with no MLX dependency. Source lint clean.
 Restored local serial/FIFO server at 127.0.0.1:8080; log results/runtime_v04_serial.log.
+
+## v0.5 runtime hardening — 2026-10-18
+
+Added a local browser dashboard after diagnosing that `/` returned 404 and the
+service process was down. The page shows live health/model/queue/device state and
+a streaming inference console. Added deterministic resource admission, guarded
+soak presets, exact token-reference gates and restart supervision. KV reservation
+estimates remain explicitly separate from real MLX allocator samples.
+
+Validation before the long soak: 104 tests passed and Ruff clean. Real serial
+reference and batch verification matched exact token IDs for three pinned cases.
+A deliberate 10 MiB reservation budget admitted one of six simultaneous long
+requests, rejected five for memory pressure, completed 256 output tokens, stayed
+ready and released all reservations. A controlled SIGKILL of ready worker PID
+98639 produced logged exit -9; the supervisor restarted PID 98764, gated on
+readiness, and a five-request recovery smoke passed. Nothing pushed or published.
+
+Final guarded soak: 3,650/3,650 successful, zero failed/rejected, 233,600 tokens
+over 900.402 seconds (259.44 tokens/s). P50/P95/P99 was 0.489/0.521/0.548 seconds;
+180/180 guard samples were ready and active MLX allocation stayed about 268 MiB.
+The installed v0.5 wheel passed all 104 tests without MLX. Browser UI was visually
+verified and streamed 64 tokens. Final in-flight crash: one token arrived, the
+verified worker was SIGKILLed, the client received `transport_error`, a new ready
+instance appeared, and an eight-token recovery request completed. Evidence is in
+results/v05_soak_15m_run2*, results/v05_inflight_crash_recovery.json and
+docs/v05-runtime-hardening.md.

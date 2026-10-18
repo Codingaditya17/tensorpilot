@@ -4,6 +4,8 @@ import threading
 
 import pytest
 
+from tensorpilot.admission import ResourceAdmission
+
 from tensorpilot.backend import Token
 from tensorpilot.engine import Engine, Overloaded
 from tensorpilot.metrics import Metrics
@@ -201,6 +203,55 @@ def test_slow_consumer_is_not_misclassified_as_a_stalled_backend():
             assert (await terminal(job))["code"] == "deadline_exceeded"
             assert engine.ready
             assert not engine.unhealthy
+        finally:
+            await engine.close()
+    asyncio.run(scenario())
+
+
+def test_resource_admission_estimates_reserves_and_releases_deterministically():
+    admission = ResourceAdmission(5_000, bytes_per_token=10, sequence_overhead_bytes=100)
+    estimate = admission.estimate("four", 6)
+    assert estimate.prompt_tokens_upper_bound == 4
+    assert estimate.kv_bytes == 200
+    assert admission.reserve(estimate)
+    assert admission.snapshot()["estimated_kv_reserved_bytes"] == 200
+    admission.release(estimate)
+    assert admission.snapshot()["pressure_ratio"] == 0
+
+
+def test_memory_pressure_rejection_does_not_leak_reservations():
+    async def scenario():
+        admission = ResourceAdmission(240, bytes_per_token=10, sequence_overhead_bytes=100)
+        metrics = Metrics()
+        engine = Engine(FakeBackend, admission=admission, metrics=metrics)
+        await engine.start(warmup=False)
+        try:
+            accepted = engine.submit("abcd", 10, 5)  # 240 bytes, entire estimate budget.
+            with pytest.raises(Overloaded, match="KV-cache"):
+                engine.submit("x", 1, 5)
+            assert admission.reservations == 1
+            assert metrics.admission_decisions.labels(decision="memory_pressure")._value.get() == 1
+            assert (await terminal(accepted))["type"] == "done"
+            await asyncio.wait_for(engine.queue.join(), 1)
+            assert admission.reservations == 0
+            assert admission.reserved_bytes == 0
+            assert (await terminal(engine.submit("again", 1, 5)))["type"] == "done"
+        finally:
+            await engine.close()
+    asyncio.run(scenario())
+
+
+def test_queue_full_rolls_back_memory_reservation():
+    async def scenario():
+        engine = Engine(FakeBackend, queue_size=1)
+        await engine.start(warmup=False)
+        try:
+            queued = engine.submit("queued", 20, 5)
+            before = engine.admission.reserved_bytes
+            with pytest.raises(Overloaded, match="queue full"):
+                engine.submit("overflow", 20, 5)
+            assert engine.admission.reserved_bytes == before
+            assert (await terminal(queued))["type"] == "done"
         finally:
             await engine.close()
     asyncio.run(scenario())

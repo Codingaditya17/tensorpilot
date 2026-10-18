@@ -11,6 +11,12 @@ class Metrics:
                             ["status"], **options)
         self.admitted = Counter("tensorpilot_admitted_requests", "Jobs accepted into the scheduler", **options)
         self.rejected = Counter("tensorpilot_rejected_requests", "Jobs rejected at admission", **options)
+        self.admission_decisions = Counter("tensorpilot_admission_decisions", "Admission outcomes by deterministic reason",
+                                           ["decision"], **options)
+        self.estimated_kv_reserved = Gauge("tensorpilot_estimated_kv_reserved_bytes",
+                                           "Reserved KV estimate; not measured memory", **options)
+        self.estimated_kv_budget = Gauge("tensorpilot_estimated_kv_budget_bytes",
+                                         "Configured KV estimate budget; not allocator capacity", **options)
         self.outcomes = Counter("tensorpilot_jobs", "Worker outcomes; completed means generated",
                                 ["outcome"], **options)
         self.tokens = Counter("tensorpilot_output_tokens", "Generated non-EOS tokens, including partial jobs", **options)
@@ -34,6 +40,8 @@ class Metrics:
     def render(self, engine):
         self.queue_depth.set(engine.queue.qsize())
         self.active.set(engine.active_count)
+        self.estimated_kv_reserved.set(engine.admission.reserved_bytes)
+        self.estimated_kv_budget.set(engine.admission.budget_bytes)
         self.call_age.set(time.perf_counter() - engine.call_started_s if engine.call_started_s is not None else 0)
         if engine.last_memory_sample_s is not None:
             self.memory_age.set(time.perf_counter() - engine.last_memory_sample_s)

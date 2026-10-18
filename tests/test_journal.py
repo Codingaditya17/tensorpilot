@@ -8,6 +8,7 @@ import pytest
 from tensorpilot.journal import Journal, recover
 from tensorpilot.load import run, validate_config
 from tensorpilot.server import create_app
+from tensorpilot.soak import guarded_run
 from test_serving import FakeBackend
 
 
@@ -125,3 +126,20 @@ def test_footer_count_mismatch_is_not_reported_as_valid(tmp_path):
     path.write_text("".join(json.dumps(entry) + "\n" for entry in entries))
     with pytest.raises(ValueError, match="count"):
         recover(path)
+
+
+def test_guarded_soak_records_health_and_completes(tmp_path):
+    async def scenario():
+        async with TestClient(TestServer(create_app(FakeBackend, warmup=False))) as http:
+            args = SimpleNamespace(url=str(http.make_url("/")), minutes=.0005, concurrency=1,
+                                   rate=0, prompt_repeats=2, output_tokens=1, plan_size=2,
+                                   max_requests=20, max_mlx_active_mib=256, poll_seconds=.01,
+                                   max_memory_sample_age=5, timeout=5, journal_fsync=False,
+                                   output=str(tmp_path / "soak.json"))
+            report, state = await guarded_run(args)
+            assert state["status"] == "completed"
+            assert state["samples"] and all(sample["ready"] for sample in state["samples"])
+            assert report["summary"]["successful_requests"] > 0
+            assert (tmp_path / "soak.guard.json").exists()
+            assert (tmp_path / "soak.workload.json").exists()
+    asyncio.run(scenario())
