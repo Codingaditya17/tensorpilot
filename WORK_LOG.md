@@ -166,3 +166,43 @@ unrelated Downloads files. Nothing is published or pushed remotely.
 Remaining scope: real batching, durable serving queues, per-tenant identity,
 automatic process restart, broad model-quality evaluation, distributed/AMD GPU
 execution and cluster fault control. These are roadmap items, not completed claims.
+
+
+## Continuation — experimental batching adapter — 2026-10-18
+
+Inspected installed continuous-batching API and tokenizer ownership. Added an
+experimental model-thread adapter with independent sequence IDs, detokenizers,
+budgets and cancellation. It is not connected to HTTP serving. Validation:
+**78 CPU tests passed**, Ruff clean. Real batch execution and engine integration
+are pending; design and boundaries are in docs/batching-design.md. Existing v0.3
+release artifacts remain the earlier 74-test checkpoint, unchanged.
+
+## Continuation — v0.4 continuous batching — 2026-10-18
+
+Implemented opt-in BatchEngine and MLXBatchAdapter with independent UID state,
+continuous admission, bounded delivery, per-sequence removal and shared-context
+failure handling. Serial/FIFO remains default. Extended matched experiment and
+comparison tools with execution-mode axis and configuration mismatch rejection.
+
+Validation: 95 tests pass, Ruff clean. Real adapter greedy token equality passed.
+Real HTTP lifecycle: six completions, independent disconnect cancellation,
+overload 10 complete/30 rejected, recovery four complete; 21 completed jobs and
+one cancellation reconcile with metrics. Three 30-request repetitions per mode:
+180/180 successful, batch median 450.58 vs serial 288.46 tokens/s (+56.2%); P95
+0.8852 vs 1.4198 seconds (-37.7%). Shared allocator maximum 348,010,500 vs
+341,534,144 bytes. Scope/limitations and reproduction: docs/batching-design.md.
+Evidence: results/batch_execution_seed42, results/batch_http_validation.json,
+results/batch_adapter_conformance_v01.json. Experiment source ZIP retains exact
+measurement source before version-label/doc updates. Earlier v0.3 exports remain
+unchanged. No remote push/publication.
+
+Follow-up validation: 30-second batch soak completed 288 requests, zero failures/
+rejections, 13,872 output tokens, 452.99 tokens/s over 30.623 seconds. All 20
+readiness snapshots healthy. Raw journal/report/monitor in results/batch_soak*.
+Hardened regression gate: reject candidates with increased rejections, even when
+latency improves. Added dedicated test. Final wheel CPU verification recorded
+below after rebuild. This short soak does not establish long-term memory bounds.
+
+Final v0.4 wheel rebuilt and installed outside the checkout: all 95 tests passed
+in the isolated CPU environment with no MLX dependency. Source lint clean.
+Restored local serial/FIFO server at 127.0.0.1:8080; log results/runtime_v04_serial.log.

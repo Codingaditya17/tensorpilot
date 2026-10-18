@@ -131,6 +131,14 @@ def test_regression_gate_fails_latency_and_error_regressions():
     assert len(result["reasons"]) == 2
 
 
+def test_regression_gate_rejects_faster_but_less_available_candidate():
+    left, right = report("fifo", .2), report("shortest-budget", .1)
+    right["summary"]["rejected_requests"] = 1
+    result = regression_gate(compare_reports([left, right]), .1)
+    assert not result["passed"]
+    assert result["reasons"] == ["candidate has more rejected requests"]
+
+
 @pytest.mark.parametrize("partial", ["duration", "recovery"])
 def test_regression_comparison_refuses_partial_or_different_observation_windows(partial):
     baseline, candidate = report("fifo"), report("shortest-budget")
@@ -145,6 +153,36 @@ def test_regression_comparison_refuses_partial_or_different_observation_windows(
 def test_alternating_policy_order():
     assert run_order(2) == [(1, "fifo"), (1, "shortest-budget"),
                             (2, "shortest-budget"), (2, "fifo")]
+
+
+def execution_report(mode, capacity=2):
+    result = report("fifo")
+    result["metadata"]["server"].update(execution_mode=mode,
+        max_active_sequences=capacity if mode == "batch" else 1,
+        prefill_step_size=256 if mode == "batch" else 2048)
+    return result
+
+
+def test_execution_comparison_and_gate():
+    result = compare_reports([execution_report("serial"), execution_report("batch")], axis="execution_mode")
+    assert result["by_variant"]["batch"]["repetitions"] == 1
+    assert regression_gate(result, .05)["passed"]
+    assert run_order(2, ("serial", "batch")) == [(1, "serial"), (1, "batch"), (2, "batch"), (2, "serial")]
+
+
+def test_policy_comparison_rejects_different_execution():
+    left, right = execution_report("serial"), execution_report("batch")
+    right["metadata"]["server"]["scheduler"] = "shortest-budget"
+    with pytest.raises(ValueError, match="differs"):
+        compare_reports([left, right])
+    with pytest.raises(ValueError, match="differs"):
+        compare_reports([left, right], axis="execution_mode")
+
+
+def test_execution_comparison_rejects_inconsistent_capacity():
+    with pytest.raises(ValueError, match="execution settings"):
+        compare_reports([execution_report("serial"), execution_report("serial"),
+                         execution_report("batch", 2), execution_report("batch", 4)], axis="execution_mode")
 
 
 def test_load_rejects_mismatched_stream_token_counts():

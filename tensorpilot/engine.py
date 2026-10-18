@@ -19,6 +19,7 @@ PUBLIC_ERRORS = {
     "inference_error": "Inference failed",
     "shutting_down": "Server shutting down",
     "backend_unavailable": "Inference worker is unavailable",
+    "slow_consumer": "Response buffer is full; request shed to protect other sequences",
 }
 
 
@@ -51,6 +52,9 @@ def advance(iterator):
 
 
 class Engine:
+    execution_mode = "serial"
+    max_active_sequences = 1
+
     def __init__(self, factory, queue_size=8, metrics=None, *, scheduler="fifo", max_queue_wait_s=1.0,
                  stall_timeout_s=30.0):
         if not math.isfinite(stall_timeout_s) or stall_timeout_s <= 0:
@@ -74,6 +78,10 @@ class Engine:
     def ready(self):
         return not self.closing and not self.unhealthy and self.worker is not None and not self.worker.done()
 
+    @property
+    def active_count(self):
+        return int(self.active is not None)
+
     async def call(self, function, *args):
         self.call_started_s = time.perf_counter()
         try:
@@ -87,12 +95,16 @@ class Engine:
             if warmup:
                 await self.call(lambda: list(self.backend.stream("Hello", 8)))
             self._observe_memory(await self.call(self.backend.memory))
+            await self._prepare_execution()
         except BaseException:
             self.pool.shutdown(wait=False)
             raise
         self.worker = asyncio.create_task(self.run(), name="tensorpilot-model-worker")
         self.worker.add_done_callback(self._worker_stopped)
         self.watchdog = asyncio.create_task(self._monitor_progress(), name="tensorpilot-worker-watchdog")
+
+    async def _prepare_execution(self):
+        """Execution-specific initialization, before admission/worker startup."""
 
     def _observe_memory(self, sample):
         self.last_memory_sample_s = time.perf_counter()

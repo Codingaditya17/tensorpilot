@@ -15,7 +15,7 @@ class Metrics:
                                 ["outcome"], **options)
         self.tokens = Counter("tensorpilot_output_tokens", "Generated non-EOS tokens, including partial jobs", **options)
         self.queue_depth = Gauge("tensorpilot_queue_depth", "Waiting jobs, excluding active execution", **options)
-        self.active = Gauge("tensorpilot_active_requests", "Active model executions", **options)
+        self.active = Gauge("tensorpilot_active_requests", "Active sequences on the single model-owner thread", **options)
         self.call_age = Gauge("tensorpilot_worker_call_age_seconds", "Elapsed current backend call; zero when idle", **options)
         self.watchdog_trips = Counter("tensorpilot_worker_stalls", "Backend stall watchdog trips", **options)
         self.mlx_active = Gauge("tensorpilot_mlx_active_bytes", "Last sampled MLX active allocation, not process RSS", **options)
@@ -23,6 +23,9 @@ class Metrics:
         self.memory_age = Gauge("tensorpilot_memory_sample_age_seconds", "Age of cached backend memory sample", **options)
         self.scheduled = Counter("tensorpilot_scheduled_requests", "Jobs dispatched by scheduling decision",
                                  ["reason"], **options)
+        self.batch_steps = Counter("tensorpilot_batch_steps", "Shared batch prefill/decode steps", **options)
+        self.decode_width = Histogram("tensorpilot_decode_batch_width", "Actual response count per nonempty batch decode step",
+                                      buckets=(1, 2, 4, 8), **options)
         self.queue_wait = Histogram("tensorpilot_queue_wait_seconds", "Admission to worker start, all dequeued jobs",
                                     buckets=(.001, .01, .05, .1, .25, .5, 1, 2, 5, 15, 60, 120), **options)
         self.ttft = Histogram("tensorpilot_ttft_seconds", "Admission to first non-EOS token, where observed",
@@ -30,7 +33,7 @@ class Metrics:
 
     def render(self, engine):
         self.queue_depth.set(engine.queue.qsize())
-        self.active.set(int(engine.active is not None))
+        self.active.set(engine.active_count)
         self.call_age.set(time.perf_counter() - engine.call_started_s if engine.call_started_s is not None else 0)
         if engine.last_memory_sample_s is not None:
             self.memory_age.set(time.perf_counter() - engine.last_memory_sample_s)

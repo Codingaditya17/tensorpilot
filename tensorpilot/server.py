@@ -18,6 +18,7 @@ from . import __version__
 from .backend import MLXBackend
 from .bench import DEFAULT_MODEL
 from .engine import Engine, Overloaded
+from .batch_engine import BatchEngine
 from .environment import source_fingerprint, dependency_versions
 from .metrics import Metrics
 from .scheduler import Scheduler
@@ -31,14 +32,26 @@ REQUEST_ID = web.RequestKey("request_id", str) if hasattr(web, "RequestKey") els
 
 def create_app(factory, *, queue_size=8, max_tokens=256, max_timeout=120,
                warmup=True, metadata=None, api_key=None, scheduler="fifo", max_queue_wait_s=1.0,
-               instance_id=None, stall_timeout_s=30.0):
+               instance_id=None, stall_timeout_s=30.0, execution="serial", batch_size=2,
+               prefill_step_size=256, batch_adapter_factory=None):
     metrics = Metrics()
-    engine = Engine(factory, queue_size, metrics=metrics, scheduler=scheduler,
-                    max_queue_wait_s=max_queue_wait_s, stall_timeout_s=stall_timeout_s)
+    options = {"metrics": metrics, "scheduler": scheduler,
+               "max_queue_wait_s": max_queue_wait_s, "stall_timeout_s": stall_timeout_s}
+    if execution == "batch":
+        options.update(max_batch_size=batch_size, prefill_step_size=prefill_step_size)
+        if batch_adapter_factory is not None:
+            options["adapter_factory"] = batch_adapter_factory
+        engine = BatchEngine(factory, queue_size, **options)
+    elif execution == "serial":
+        engine = Engine(factory, queue_size, **options)
+    else:
+        raise ValueError("execution must be serial or batch")
     service_metadata = {**(metadata or {}), "instance_id": instance_id or uuid.uuid4().hex,
                         "scheduler": scheduler, "max_queue_wait_s": max_queue_wait_s,
                         "service_version": __version__}
     service_metadata["stall_timeout_s"] = stall_timeout_s
+    service_metadata.update(execution_mode=execution, max_active_sequences=engine.max_active_sequences,
+                            prefill_step_size=prefill_step_size if execution == "batch" else 2048)
 
     def error(request, status, code, message, headers=None):
         return web.json_response({"error": {"code": code, "message": message},
@@ -112,10 +125,11 @@ def create_app(factory, *, queue_size=8, max_tokens=256, max_timeout=120,
         return web.json_response({"ready": ready(), "queue_depth": engine.queue.qsize(),
                                   "unhealthy_reason": engine.unhealthy_reason,
                                   "active": engine.active is not None,
-                                  "execution_concurrency": 1, **service_metadata})
+                                  "active_sequences": engine.active_count,
+                                  "execution_concurrency": engine.max_active_sequences, **service_metadata})
 
     async def model_info(request):
-        return web.json_response({"api_version": "v1", "execution_concurrency": 1,
+        return web.json_response({"api_version": "v1", "execution_concurrency": engine.max_active_sequences,
                                   "max_output_tokens": max_tokens,
                                   "max_timeout_s": max_timeout, **service_metadata})
 
@@ -190,6 +204,10 @@ def main():
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--queue-size", type=int, default=8)
+    parser.add_argument("--execution", choices=("serial", "batch"), default="serial",
+                        help="batch is opt-in real continuous MLX batching")
+    parser.add_argument("--batch-size", type=int, default=2, help="maximum active batch sequences (1..8)")
+    parser.add_argument("--prefill-step-size", type=int, default=256, help="batch prefill segmentation (1..2048)")
     parser.add_argument("--memory-gib", type=float, default=6)
     parser.add_argument("--scheduler", choices=Scheduler.POLICIES, default="fifo")
     parser.add_argument("--max-queue-wait", type=float, default=1.0,
@@ -203,6 +221,10 @@ def main():
         parser.error("max-queue-wait must be finite and positive")
     if not math.isfinite(args.stall_timeout) or args.stall_timeout <= 0:
         parser.error("stall-timeout must be finite and positive")
+    if not 1 <= args.batch_size <= 8 or not 1 <= args.prefill_step_size <= 2048:
+        parser.error("batch-size must be in 1..8; prefill-step-size in 1..2048")
+    if args.execution == "batch" and args.profile_memory:
+        parser.error("--profile-memory is currently supported only by serial execution")
     api_key = os.environ.get("TENSORPILOT_API_KEY")
     if args.host not in ("127.0.0.1", "localhost", "::1") and not api_key:
         parser.error("set TENSORPILOT_API_KEY before binding a non-loopback address")
@@ -220,7 +242,9 @@ def main():
                                       profile_memory=args.profile_memory),
                      queue_size=args.queue_size, metadata=metadata, api_key=api_key,
                      scheduler=args.scheduler, max_queue_wait_s=args.max_queue_wait,
-                     instance_id=args.instance_id, stall_timeout_s=args.stall_timeout)
+                     instance_id=args.instance_id, stall_timeout_s=args.stall_timeout,
+                     execution=args.execution, batch_size=args.batch_size,
+                     prefill_step_size=args.prefill_step_size)
     web.run_app(app, host=args.host, port=args.port, handler_cancellation=True, access_log=None)
 
 

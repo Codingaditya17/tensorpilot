@@ -26,8 +26,9 @@
 - [ ] Context/memory admission based on measured backend resource information.
 - [x] Shared SDK/load stream protocol conformance.
 - [ ] Broader backend conformance and pinned quality evaluation set.
-- [ ] Investigate real MLX batching with independent per-sequence cache/cancellation.
-      Keep batching opt-in until correctness, memory and throughput are measured.
+- [x] Opt-in real MLX continuous batching with independent sequence state,
+      cancellation, deadlines, failure isolation and matched throughput evidence.
+- [ ] Broaden batching capacity/context/model coverage and sustained memory testing.
 
 ## Separate future modules
 

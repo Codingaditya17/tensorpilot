@@ -11,7 +11,13 @@ MEASURES = ("completed_output_tokens_per_s", "p50_client_latency_s", "p95_client
             "p99_client_latency_s", "p95_client_ttft_s", "p95_queue_wait_s", "max_queue_wait_s")
 
 
-def _signature(report):
+def _execution_signature(server):
+    return (server.get("execution_mode", "serial"),
+            server.get("max_active_sequences", server.get("execution_concurrency", 1)),
+            server.get("prefill_step_size", 2048))
+
+
+def _signature(report, axis="scheduler"):
     metadata = report["metadata"]
     server = metadata["server"]
     config = metadata["config"]
@@ -26,7 +32,8 @@ def _signature(report):
                 "model", "model_revision", "memory_limit_bytes", "max_prompt_tokens",
                 "max_output_tokens", "sampling", "prompt_format", "mlx_version",
                 "mlx_lm_version", "server_platform", "server_python", "queue_capacity", "max_queue_wait_s",
-                "source_sha256", "dependencies", "mlx_device", "memory_profiling", "stall_timeout_s")))
+                "source_sha256", "dependencies", "mlx_device", "memory_profiling", "stall_timeout_s")),
+            _execution_signature(server) if axis == "scheduler" else server.get("scheduler"))
 
 
 def _distribution(values):
@@ -43,15 +50,19 @@ def _aggregate(summaries):
             "metrics": {key: _distribution([item.get(key) for item in summaries]) for key in MEASURES}}
 
 
-def compare_reports(reports, baseline="fifo", candidate="shortest-budget"):
+def compare_reports(reports, baseline=None, candidate=None, *, axis="scheduler"):
+    if axis not in ("scheduler", "execution_mode"):
+        raise ValueError("comparison axis must be scheduler or execution_mode")
+    baseline = baseline or ("fifo" if axis == "scheduler" else "serial")
+    candidate = candidate or ("shortest-budget" if axis == "scheduler" else "batch")
     if not reports:
         raise ValueError("no reports supplied")
-    expected = _signature(reports[0])
-    if any(_signature(report) != expected for report in reports[1:]):
+    expected = _signature(reports[0], axis)
+    if any(_signature(report, axis) != expected for report in reports[1:]):
         raise ValueError("workload, model artifact, environment, or experiment configuration differs")
     grouped = {}
     for report in reports:
-        policy = report["metadata"]["server"].get("scheduler")
+        policy = report["metadata"]["server"].get(axis, "serial" if axis == "execution_mode" else None)
         if policy not in (baseline, candidate):
             raise ValueError(f"unexpected scheduler policy: {policy}")
         grouped.setdefault(policy, []).append(report)
@@ -64,6 +75,9 @@ def compare_reports(reports, baseline="fifo", candidate="shortest-budget"):
         raise ValueError("request classes differ between reports")
     by_policy = {}
     for policy, runs in grouped.items():
+        settings = _execution_signature(runs[0]["metadata"]["server"])
+        if any(_execution_signature(run["metadata"]["server"]) != settings for run in runs[1:]):
+            raise ValueError("execution settings differ within a comparison group")
         by_policy[policy] = {"repetitions": len(runs), "overall": _aggregate([r["summary"] for r in runs]),
                              "by_class": {label: _aggregate([r["by_class"][label] for r in runs])
                                           for label in sorted(labels)}}
@@ -76,10 +90,11 @@ def compare_reports(reports, baseline="fifo", candidate="shortest-budget"):
             result[key] = (after / before - 1) if before is not None and before > 0 and after is not None else None
         return result
 
-    return {"schema_version": 1, "baseline": baseline, "candidate": candidate,
+    return {"schema_version": 1 if axis == "scheduler" else 2, "comparison_axis": axis,
+            "baseline": baseline, "candidate": candidate,
             "workload_sha256": reports[0]["metadata"]["workload_sha256"],
             "artifact_sha256": reports[0]["metadata"]["server"]["artifact_sha256"],
-            "by_policy": by_policy,
+            ("by_policy" if axis == "scheduler" else "by_variant"): by_policy,
             "relative_change": {"overall": changes(by_policy[baseline]["overall"], by_policy[candidate]["overall"]),
                                  "by_class": {label: changes(by_policy[baseline]["by_class"][label],
                                                               by_policy[candidate]["by_class"][label]) for label in sorted(labels)}},
@@ -89,8 +104,9 @@ def compare_reports(reports, baseline="fifo", candidate="shortest-budget"):
 def regression_gate(comparison, max_p95_regression):
     if not math.isfinite(max_p95_regression) or max_p95_regression < 0:
         raise ValueError("regression threshold must be finite and nonnegative")
-    base = comparison["by_policy"][comparison["baseline"]]["overall"]
-    candidate = comparison["by_policy"][comparison["candidate"]]["overall"]
+    groups = comparison.get("by_variant", comparison.get("by_policy"))
+    base = groups[comparison["baseline"]]["overall"]
+    candidate = groups[comparison["candidate"]]["overall"]
     change = comparison["relative_change"]["overall"]["p95_client_latency_s"]
     reasons = []
     if change is None:
@@ -99,6 +115,8 @@ def regression_gate(comparison, max_p95_regression):
         reasons.append("overall P95 latency exceeds the allowed regression")
     if candidate["failed_requests"] > base["failed_requests"]:
         reasons.append("candidate has more failed requests")
+    if candidate["rejected_requests"] > base["rejected_requests"]:
+        reasons.append("candidate has more rejected requests")
     return {"passed": not reasons, "max_p95_regression": max_p95_regression, "reasons": reasons}
 
 
@@ -107,9 +125,13 @@ def main():
     parser.add_argument("reports", nargs="+")
     parser.add_argument("--output", default="results/comparison.json")
     parser.add_argument("--max-p95-regression", type=float)
+    parser.add_argument("--axis", choices=("scheduler", "execution_mode"), default="scheduler")
+    parser.add_argument("--baseline")
+    parser.add_argument("--candidate")
     args = parser.parse_args()
     try:
-        comparison = compare_reports([json.loads(Path(path).read_text()) for path in args.reports])
+        comparison = compare_reports([json.loads(Path(path).read_text()) for path in args.reports],
+                                     args.baseline, args.candidate, axis=args.axis)
         comparison["source_reports"] = args.reports
         if args.max_p95_regression is not None:
             comparison["gate"] = regression_gate(comparison, args.max_p95_regression)

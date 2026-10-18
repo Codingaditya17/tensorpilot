@@ -6,7 +6,8 @@ reproducible workload experiments.**
 TensorPilot runs a local transformer through MLX on Apple Silicon. It implements
 its own queue/scheduling lifecycle and measures the effects of concurrency,
 overload, deadlines and workload composition. The current runtime has one model
-execution worker; concurrent HTTP clients queue for that worker.
+owner thread. Serial execution is the default; opt-in continuous batching advances
+multiple independent sequences through that thread.
 
 ## What works
 
@@ -48,6 +49,17 @@ container is not a substitute for the local GPU backend.
 ```bash
 tensorpilot-server --queue-size 8 --memory-gib 6
 ```
+
+Enable measured, experimental continuous batching with
+`tensorpilot-server --execution batch --batch-size 2 --offline`.
+Each sequence has independent output budgets, detokenization, cancellation and
+deadlines. A full response buffer sheds that sequence so other clients can
+continue. See [batching design and results](docs/batching-design.md).
+
+On this Mac's Apple M5, three matched 30-request runs per mode measured 56.2%
+higher median throughput and 37.7% lower median P95 latency with batching at width
+two. All 180 measured requests succeeded. These results apply to the recorded
+model/workload; serial remains the default.
 
 The default model is `mlx-community/Qwen2.5-0.5B-Instruct-4bit`. First use downloads
 the model; subsequent cached runs can use `--offline`. Pin a specific snapshot

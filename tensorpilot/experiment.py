@@ -22,10 +22,10 @@ from .reporting import write_json
 from .workloads import build_workload, fingerprint
 
 
-def run_order(repetitions):
+def run_order(repetitions, variants=("fifo", "shortest-budget")):
     # Counterbalance start order to reduce systematic thermal/time ordering bias.
     return [(repeat, policy) for repeat in range(1, repetitions + 1)
-            for policy in (("fifo", "shortest-budget") if repeat % 2 else ("shortest-budget", "fifo"))]
+            for policy in (variants if repeat % 2 else variants[::-1])]
 
 
 async def ensure_port_free(port):
@@ -104,15 +104,21 @@ async def run_experiment(args):
     write_json(manifest_path, manifest)
     revision = args.revision
     reports = []
+    comparison_kind = getattr(args, "comparison", "scheduler")
+    variants = ("serial", "batch") if comparison_kind == "execution" else ("fifo", "shortest-budget")
     try:
-        for repeat, policy in run_order(args.repeat):
+        for repeat, variant in run_order(args.repeat, variants):
+            policy = "fifo" if comparison_kind == "execution" else variant
+            execution = variant if comparison_kind == "execution" else getattr(args, "execution", "serial")
             await ensure_port_free(args.port)
             instance_id = uuid.uuid4().hex
-            name = f"repeat{repeat:02d}_{policy}"
+            name = f"repeat{repeat:02d}_{variant}"
             command = [sys.executable, "-m", "tensorpilot.server", "--port", str(args.port),
                        "--model", args.model, "--queue-size", str(args.queue_size),
                        "--memory-gib", str(args.memory_gib), "--scheduler", policy,
-                       "--max-queue-wait", str(args.max_queue_wait), "--instance-id", instance_id]
+                       "--max-queue-wait", str(args.max_queue_wait), "--instance-id", instance_id,
+                       "--execution", execution, "--batch-size", str(args.batch_size),
+                       "--prefill-step-size", str(args.prefill_step_size)]
             if revision:
                 command.extend(["--revision", revision])
             if args.offline:
@@ -127,7 +133,8 @@ async def run_experiment(args):
                         if not revision:
                             raise ValueError("experiment requires an immutable model revision")
                     warmup_args = SimpleNamespace(url=f"http://127.0.0.1:{args.port}", requests=len(warmup_plan),
-                                                  concurrency=1, rate=0, max_tokens=128, timeout=args.timeout,
+                                                  concurrency=min(args.batch_size, len(warmup_plan), args.queue_size) if execution == "batch" else 1,
+                                                  rate=0, max_tokens=128, timeout=args.timeout,
                                                   workload_file=str(warmup_path), seed=args.seed, workload="mixed")
                     warmup_report = await run_load(warmup_args)
                     write_json(output / f"{name}.warmup.json", warmup_report)
@@ -144,7 +151,8 @@ async def run_experiment(args):
                     report["metadata"]["experiment_order_index"] = len(reports)
                     write_json(load_args.output, report)
                     reports.append(report)
-                    manifest["runs"].append({"repeat": repeat, "policy": policy,
+                    manifest["runs"].append({"repeat": repeat, "policy": policy, "variant": variant,
+                                             "execution_mode": execution,
                                              "report": f"{name}.json", "instance_id": instance_id,
                                              "artifact_sha256": health["artifact_sha256"],
                                              "model_revision": health.get("model_revision")})
@@ -154,7 +162,7 @@ async def run_experiment(args):
                           f"{summary['completed_output_tokens_per_s']:.1f} output tokens/s", flush=True)
                 finally:
                     await stop_process(process)
-        comparison = compare_reports(reports)
+        comparison = compare_reports(reports, axis="execution_mode" if comparison_kind == "execution" else "scheduler")
         comparison["source_reports"] = [run["report"] for run in manifest["runs"]]
         write_json(output / "comparison.json", comparison)
         manifest["status"] = "completed"
@@ -184,6 +192,11 @@ def main():
     parser.add_argument("--queue-size", type=int, default=8)
     parser.add_argument("--memory-gib", type=float, default=6)
     parser.add_argument("--max-queue-wait", type=float, default=1)
+    parser.add_argument("--comparison", choices=("scheduler", "execution"), default="scheduler")
+    parser.add_argument("--execution", choices=("serial", "batch"), default="serial",
+                        help="execution mode for scheduler comparisons")
+    parser.add_argument("--batch-size", type=int, default=2)
+    parser.add_argument("--prefill-step-size", type=int, default=256)
     parser.add_argument("--port", type=int, default=8080)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     parser.add_argument("--output-dir", default=f"results/experiment_{stamp}")
@@ -192,6 +205,8 @@ def main():
         parser.error("requests/repeat/queue-size must be positive; concurrency must be in 1..queue-size")
     if args.requests > 10000 or args.concurrency > 256:
         parser.error("comparison limits: requests <= 10000, concurrency <= 256")
+    if not 1 <= args.batch_size <= 8 or not 1 <= args.prefill_step_size <= 2048:
+        parser.error("batch-size must be in 1..8; prefill-step-size in 1..2048")
     if not math.isfinite(args.rate) or args.rate < 0 or not 0 < args.timeout <= 120:
         parser.error("rate must be finite and nonnegative; timeout must be in (0, 120]")
     if not 0 < args.memory_gib <= 8 or not math.isfinite(args.max_queue_wait) or args.max_queue_wait <= 0:
