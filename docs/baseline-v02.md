@@ -1,6 +1,6 @@
 # TensorPilot — inference service
 
-The service now includes a versioned streaming API, request tracing, bearer-token authentication, readiness/liveness probes, Prometheus metrics, a Python client, and CPU CI configuration. See [service integration and operations](docs/service.md) for usage and limits.
+The service now includes a versioned streaming API, request tracing, bearer-token authentication, readiness/liveness probes, Prometheus metrics, a Python client, and CPU CI configuration. See [service integration and operations](service.md) for usage and limits.
 
 These are service capabilities, not a claim of production readiness. The v0.2 benchmark workflow below remains supported.
 
