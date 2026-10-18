@@ -1,0 +1,85 @@
+# Inference service architecture
+
+```mermaid
+flowchart LR
+    App[Application / load generator] --> HTTP[Versioned HTTP API]
+    HTTP --> Validate[Validate and authenticate]
+    Validate --> Admit[Bounded admission]
+    Admit --> Queue[FIFO or shortest-budget + aging]
+    Queue --> Worker[Single model-owner thread]
+    Worker --> MLX[MLX / Apple GPU]
+    MLX --> Worker
+    Worker --> Buffer[Bounded per-request event buffer]
+    Buffer --> Stream[NDJSON stream]
+    Stream --> App
+    Deadline[Queued deadline timers / disconnect cancellation] --> Queue
+    HTTP --> Ops[Request logs / Prometheus / probes]
+    Worker --> Ops
+```
+
+## Ownership and concurrency
+
+`server.py` owns transport, validation, authentication and response delivery.
+`engine.py` owns request lifecycle and the sole model execution thread.
+`scheduler.py` owns bounded waiting capacity and next-job selection. `backend.py`
+is the MLX adapter and closes its underlying generator explicitly.
+
+All model loading, warmup, tokenization, inference, generator advancement,
+cleanup and allocator inspection run on the model thread. The asyncio loop
+continues to serve health/metrics, reject overload and expire waiting jobs while
+that thread executes a GPU operation. HTTP concurrency is not GPU parallelism.
+
+## Request lifecycle
+
+1. Validate authentication and the bounded JSON body.
+2. Validate prompt bytes, output budget and deadline. Token-length validation is
+   deferred to the model thread; it can produce a streaming error.
+3. Admit without waiting. If no queue slot exists, return structured HTTP 503.
+4. Schedule FIFO or shortest-budget, with the oldest-job aging override.
+5. Advance the model generator serially, count token IDs and record monotonic
+   timestamps. Bounded stream buffers provide backpressure.
+6. Close the model generator before publishing a successful terminal event.
+7. Count exactly one worker outcome. Delivery success remains a client metric.
+
+Waiting jobs have independent deadline tasks and can be removed on disconnect.
+Active jobs stop between model steps. Scheduler joins account for both active
+jobs and discarded waiting jobs; no synthetic queue "completion" is counted as
+successful inference.
+
+## Failure boundaries
+
+Invalid prompts and per-request inference exceptions produce safe error events.
+Internal exception messages, prompts and credentials are not logged. Backend
+cleanup failure marks readiness unhealthy and fails pending jobs, since sharing
+an uncertain model/cache state with later work is unsafe. A stopped worker also
+fails pending clients. Restoring an unhealthy backend currently requires restart.
+
+Shutdown first stops admission, fails queued jobs and requests active cancellation;
+then it drains HTTP handlers. Repeated shutdown calls share one close task. The
+in-process worker cannot forcibly interrupt a GPU call.
+
+## Measurement and provenance
+
+Server timings use admission as zero. Queue wait ends at dispatch; TTFT includes
+queueing, tokenization and prefill. Client timings include transport/buffering.
+Output-token counters exclude EOS. No model-only kernel timing is claimed.
+
+`artifacts.py` resolves model snapshots and hashes model/config/tokenizer contents.
+`environment.py` fingerprints package source and records runtime dependencies.
+`workloads.py` constructs seeded plans with content fingerprints. `experiment.py`
+owns repeated server processes, warmup, raw results and source snapshots.
+`compare.py` checks comparability before aggregating per-run metrics by class.
+
+Full-workload throughput includes pacing and failures. Percentiles are calculated
+on successful requests, so error/rejection rates must always accompany them.
+Per-class throughput divides that class's completed tokens by the same whole-run
+wall time; it is not an independent estimate of the class's serving capacity.
+
+## Why start with serial execution?
+
+Serial execution provides a comprehensible baseline and avoids concurrent access
+to mutable model/tokenizer state. It exposes queueing and fairness effects
+directly. Its limitation is capacity: more client concurrency alone cannot make
+the model decode multiple sequences simultaneously. True batching requires a
+separate execution design, per-sequence cache lifecycle and additional correctness
+tests rather than simply adding worker threads.

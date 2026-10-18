@@ -1,0 +1,121 @@
+# TensorPilot
+
+**GPU inference serving with bounded admission, observable scheduling, and
+reproducible workload experiments.**
+
+TensorPilot runs a local transformer through MLX on Apple Silicon. It implements
+its own queue/scheduling lifecycle and measures the effects of concurrency,
+overload, deadlines and workload composition. The current runtime has one model
+execution worker; concurrent HTTP clients queue for that worker.
+
+## What works
+
+- Versioned streaming HTTP API and async Python integration client.
+- Bounded request admission and bounded response buffers, with explicit overload.
+- FIFO baseline and shortest-output-budget scheduling with an aging override.
+- Immediate cancellation/expiry of waiting work, active cancellation at generation
+  boundaries, backend cleanup checks and worker readiness supervision.
+- Request IDs, safe public errors, bearer authentication, probes and Prometheus.
+- Seeded mixed-length workloads, exact streamed token counting, queue/TTFT/token
+  timings, per-class reports and repeated policy comparisons.
+- Immutable model snapshot/content fingerprints, runtime/source metadata, source
+  archives and experiment manifests.
+- Installable Python package, command-line tools, CPU test suite and CI config.
+
+Real MLX inference and CPU behavior tests are separate evidence. A scheduling
+policy is experimental until measured against a baseline; improvements to one
+latency percentile can worsen another. FIFO remains the default.
+
+## Install
+
+Use native Apple Silicon Python 3.11 or newer for real inference. The existing
+environment has been validated on Python 3.14.
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python -m ruff check tensorpilot tests
+python -m pytest -q
+```
+
+For CPU-only development/CI, install `requirements-service.txt` instead. It does
+not install MLX or download a model. Inference requires macOS/Metal; a Linux
+container is not a substitute for the local GPU backend.
+
+## Serve and call
+
+```bash
+tensorpilot-server --queue-size 8 --memory-gib 6
+```
+
+The default model is `mlx-community/Qwen2.5-0.5B-Instruct-4bit`. First use downloads
+the model; subsequent cached runs can use `--offline`. Pin a specific snapshot
+with `--revision COMMIT_SHA`. Initialization and warmup finish before binding the
+HTTP listener. Defaults are local-only at `http://127.0.0.1:8080`.
+
+In another terminal in the same environment:
+
+```bash
+tensorpilot-load --requests 10 --concurrency 2 --max-tokens 32 --output results/smoke.json
+```
+
+`POST /v1/generate` streams newline-delimited JSON. `/v1/model` describes the
+model and limits; `/livez`, `/readyz`, and `/metrics` support operations. Configure
+`TENSORPILOT_API_KEY` to require a shared bearer token for non-probe endpoints.
+The load runner reads it from the environment. The Python client accepts it as
+`Client(api_key=...)`. See [service integration](docs/service.md) for examples,
+error semantics and authentication boundaries.
+
+## Compare scheduler policies
+
+Stop the serving process first. This command refuses an occupied port and owns
+one model-server child at a time:
+
+```bash
+tensorpilot-experiment --requests 30 --concurrency 6 --repeat 3 --offline
+```
+
+It counterbalances policy order, warms each request class, pins the resolved
+model snapshot, and saves raw request reports, source/environment snapshots,
+server logs, a manifest and per-class comparison. Every policy sees the same
+seeded request plan. A concurrency-capped closed-loop workload does not guarantee
+identical wall-clock arrival times across policies.
+
+To explore a different fairness threshold, use `--max-queue-wait 0.25`. This is
+an aging threshold at dispatch boundaries, **not a latency guarantee**. See
+[scheduling design](docs/scheduling.md).
+
+An explicit regression gate can reject a slower candidate:
+
+```bash
+tensorpilot-compare results/EXPERIMENT/repeat*_fifo.json \
+  results/EXPERIMENT/repeat*_shortest-budget.json \
+  --max-p95-regression 0.05 --output results/gate.json
+```
+
+Select only measured reports, excluding `*.warmup.json`. The comparator refuses
+mismatched workloads, model artifacts, environment/configuration, or unbalanced
+repetitions. A failed gate exits with status 1. Small sample sizes still limit
+conclusions; a passing gate is not proof of general performance superiority.
+
+## Architecture and engineering record
+
+See [architecture](ARCHITECTURE.md), [work log](WORK_LOG.md),
+[current session state](SESSION_STATE.md), and [roadmap](ROADMAP.md).
+See [soak testing and recovery](docs/benchmarking.md) and
+[cache profiling](docs/memory-profiling.md) for deeper experiments.
+The [first scheduling study](docs/experiments/scheduler_2026-10-17.md) records
+540 real requests and the measured median/tail-latency tradeoff.
+The historical sequential benchmark is preserved as `tensorpilot.bench`;
+[v0.2 notes](docs/baseline-v02.md) explain its measurement limitations.
+
+## Current boundaries
+
+This is a single-node inference system with serial model execution. It has no
+true batching, distributed GPU execution, per-tenant isolation, durable queues,
+or automatic model/runtime restart yet. Allocator limits and context caps do not
+measure all macOS memory pressure. A stuck GPU operation can delay cancellation
+and shutdown. Remote deployment needs TLS and a stronger identity/operations
+model. GPU cluster reliability and MLOps extensions are tracked separately so
+simulations cannot be confused with measured local inference.

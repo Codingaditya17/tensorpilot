@@ -1,0 +1,96 @@
+{
+  "metadata": {
+    "run_at_utc": "2026-10-18T04:01:24.709563+00:00",
+    "server": {
+      "api_version": "v1",
+      "execution_concurrency": 1,
+      "max_output_tokens": 256,
+      "max_timeout_s": 120,
+      "model": "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
+      "backend": "mlx",
+      "warmup": true,
+      "mlx_lm_version": "0.32.2",
+      "mlx_version": "0.32.4",
+      "server_platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+      "server_python": "3.14.6",
+      "source_sha256": "3ce8ba7ff10f8e8d00dc2c56707252ee30f9e2c433c63d2a795fe42def439b86",
+      "dependencies": {
+        "mlx": "0.32.4",
+        "mlx-lm": "0.32.2",
+        "aiohttp": "3.14.5",
+        "prometheus-client": "0.26.0",
+        "huggingface-hub": "2.2.0",
+        "transformers": "5.20.1",
+        "tokenizers": "0.23.3"
+      },
+      "memory_limit_bytes": 6442450944,
+      "max_prompt_tokens": 2048,
+      "queue_capacity": 8,
+      "sampling": "greedy",
+      "prompt_format": "raw text, tokenizer default special tokens",
+      "instance_id": "edab7104333a49db9953c949527fb247",
+      "scheduler": "fifo",
+      "max_queue_wait_s": 1.0,
+      "service_version": "0.3.0",
+      "stall_timeout_s": 30,
+      "model_source": "huggingface",
+      "requested_revision": null,
+      "model_revision": "a5339a4131f135d0fdc6a5c8b5bbed2753bbe0f3",
+      "artifact_sha256": "909346d914889eadd92f3073fd789c19bf963886a07f88946551e975a79153a5",
+      "mlx_device": {
+        "device_name": "Apple M5",
+        "max_recommended_working_set_size": 12713115648,
+        "memory_size": 17179869184,
+        "architecture": "applegpu_g17g",
+        "max_buffer_length": 9534832640,
+        "resource_limit": 499000
+      },
+      "memory_profiling": true
+    },
+    "repetitions": 3,
+    "excluded_warmups_per_context": 1,
+    "limits": "Cache array nbytes includes spare capacity, is not unique physical GPU allocation, and profiling adds overhead. No unprofiled throughput comparison is implied."
+  },
+  "summary": [
+    {
+      "prompt_repeats": 1,
+      "runs": 3,
+      "prompt_tokens": 19,
+      "median_peak_cache_array_bytes": 3145728,
+      "median_client_elapsed_s": 0.06452070805244148,
+      "cache_profile_supported": true
+    },
+    {
+      "prompt_repeats": 8,
+      "runs": 3,
+      "prompt_tokens": 75,
+      "median_peak_cache_array_bytes": 3145728,
+      "median_client_elapsed_s": 0.07186374999582767,
+      "cache_profile_supported": true
+    },
+    {
+      "prompt_repeats": 32,
+      "runs": 3,
+      "prompt_tokens": 267,
+      "median_peak_cache_array_bytes": 6291456,
+      "median_client_elapsed_s": 0.09771370817907155,
+      "cache_profile_supported": true
+    },
+    {
+      "prompt_repeats": 64,
+      "runs": 3,
+      "prompt_tokens": 523,
+      "median_peak_cache_array_bytes": 9437184,
+      "median_client_elapsed_s": 0.10233762487769127,
+      "cache_profile_supported": true
+    },
+    {
+      "prompt_repeats": 128,
+      "runs": 3,
+      "prompt_tokens": 1035,
+      "median_peak_cache_array_bytes": 15728640,
+      "median_client_elapsed_s": 0.13236670778132975,
+      "cache_profile_supported": true
+    }
+  ]
+}

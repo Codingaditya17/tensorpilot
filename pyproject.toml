@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tensorpilot"
+dynamic = ["version"]
+description = "Bounded local GPU inference serving and reproducible scheduling experiments"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["aiohttp>=3.12,<4", "prometheus-client>=0.21,<1"]
+
+[project.optional-dependencies]
+mlx = ["mlx>=0.32.4,<0.33", "mlx-lm>=0.32.2,<0.33"]
+test = ["pytest>=8,<10", "ruff>=0.11,<1"]
+
+[project.scripts]
+tensorpilot-server = "tensorpilot.server:main"
+tensorpilot-load = "tensorpilot.load:main"
+tensorpilot-experiment = "tensorpilot.experiment:main"
+tensorpilot-compare = "tensorpilot.compare:main"
+tensorpilot-bench = "tensorpilot.bench:main"
+tensorpilot-recover = "tensorpilot.journal:main"
+tensorpilot-profile = "tensorpilot.profile:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "tensorpilot.__version__"}
+
+[tool.setuptools.packages.find]
+include = ["tensorpilot*"]
+
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]

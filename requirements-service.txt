@@ -1,0 +1,2 @@
+# CPU-compatible editable package, service and tests. No GPU runtime required.
+-e .[test]
