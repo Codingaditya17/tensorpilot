@@ -27,6 +27,8 @@ multiple independent sequences through that thread.
 - Guarded 15/30/60-minute soaks, exact token gates and worker restart supervision.
 - Synchronized prefill/decode telemetry, adaptive batch width, workload-matrix
   preflight, throughput/latency gates and bounded Apple Metal kernel capture.
+- A local multi-worker control plane with health-aware placement, draining,
+  artifact constraints, lifecycle audit history and supervised worker recovery.
 
 Real MLX inference and CPU behavior tests are separate evidence. A scheduling
 policy is experimental until measured against a baseline; improvements to one
@@ -71,6 +73,20 @@ Open `http://127.0.0.1:8080/` for the local dashboard. For automatic recovery,
 run `tensorpilot-supervisor --offline`; it owns the worker process, requires
 readiness after every start, applies a bounded restart/backoff policy and records
 lifecycle JSONL under `results/`.
+
+Run a reproducible two-worker local cluster with:
+
+```bash
+tensorpilot-cluster --workers 2 --offline --output-dir results/local-cluster
+```
+
+The cluster control API binds to `http://127.0.0.1:8090`; worker dashboards bind
+to ports 8101 and 8102. `POST /v1/generate` uses the existing NDJSON protocol.
+`GET /health` exposes placement and lifecycle history, and `GET /metrics` exposes
+cluster metrics. Workers can be drained through
+`POST /v1/workers/{worker_id}/drain`. See the
+[v0.7 control-plane design](docs/v07-cluster-control-plane.md) for the API,
+failure semantics, authentication boundaries and measured results.
 
 Resource admission defaults to a 512 MiB conservative KV estimate budget. Tune
 it with `--admission-memory-mib` and `--admission-bytes-per-token`. These are
@@ -152,10 +168,10 @@ The historical sequential benchmark is preserved as `tensorpilot.bench`;
 
 ## Current boundaries
 
-This is a single-node inference system with serial execution by default and
-opt-in fixed or adaptive MLX batching. It has no distributed GPU execution, per-tenant isolation,
-durable request queue or transparent in-flight replay. Its supervisor restarts a
-failed process after downtime. Allocator limits and context caps do not measure
-all macOS memory pressure, and a stuck GPU operation can delay cancellation and
-shutdown. Remote deployment needs TLS and stronger identity/operations controls.
-Cluster and MLOps extensions remain separate from measured local inference.
+This release includes a multi-process control plane, but all measured workers run
+on one Mac and share one Apple GPU. It does not implement distributed tensor or
+pipeline execution, per-tenant isolation, a durable request queue or transparent
+in-flight replay. Supervisors restart failed worker processes after downtime.
+Allocator limits and context caps do not measure all macOS memory pressure, and a
+stuck GPU operation can delay cancellation and shutdown. Remote deployment needs
+TLS, durable state, service discovery and stronger identity controls.

@@ -79,6 +79,8 @@ async def supervise(command, health_url, lifecycle_path, worker_log_path, *, max
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", default="http://127.0.0.1:8080")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--max-restarts", type=int, default=3)
     parser.add_argument("--ready-timeout", type=float, default=90)
     parser.add_argument("--backoff", type=float, default=1)
@@ -88,13 +90,18 @@ def main():
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--queue-size", type=int, default=8)
     parser.add_argument("--memory-gib", type=float, default=6)
+    parser.add_argument("--max-output-tokens", type=int, default=512)
     parser.add_argument("--offline", action="store_true")
     args = parser.parse_args()
     if not 0 <= args.max_restarts <= 20 or args.ready_timeout <= 0 or not 0 <= args.backoff <= 60:
         parser.error("restarts must be 0..20, timeout positive, and backoff 0..60 seconds")
-    command = [sys.executable, "-m", "tensorpilot.server", "--execution", args.execution,
+    if not 1 <= args.port <= 65535 or not 1 <= args.max_output_tokens <= 512:
+        parser.error("port must be valid and max-output-tokens must be in 1..512")
+    command = [sys.executable, "-m", "tensorpilot.server", "--host", args.host,
+               "--port", str(args.port), "--execution", args.execution,
                "--batch-size", str(args.batch_size), "--queue-size", str(args.queue_size),
-               "--memory-gib", str(args.memory_gib)]
+               "--memory-gib", str(args.memory_gib),
+               "--max-output-tokens", str(args.max_output_tokens)]
     if args.offline:
         command.append("--offline")
     try:

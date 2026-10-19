@@ -38,14 +38,21 @@
 - [x] Reproducible 128/512/2048 by 128/256/512 workload matrix with safe preflight.
 - [x] Fixed-width/adaptive comparisons and latency/throughput regression gates.
 - [x] Bounded Apple Metal `.gputrace` capture with a provenance manifest.
+- [x] Health-aware multi-worker registry and capacity-aware request placement.
+- [x] Worker draining, stale-heartbeat exclusion and model/artifact constraints.
+- [x] Supervised local cluster launcher and explicit no-replay crash behavior.
+- [x] Auditable bounded placement/lifecycle history and cluster Prometheus metrics.
 
 ## Separate future modules
 
-- [ ] Node acceptance/health rules and an auditable recovery state machine.
-- [ ] Clearly marked cluster/GPU fault simulations; real kind control-plane tests.
+- [x] Local node acceptance/health rules and auditable process recovery state.
+- [x] Clearly marked local worker fault experiments with a real control-plane process.
+- [ ] Multi-host discovery, durable control-plane state and Kubernetes integration.
+- [ ] Real independent-GPU cluster measurements and network fault injection.
 - [ ] Adapter boundaries for real AMD GPU/ROCm metrics when hardware is available.
 - [ ] Model artifact registry, quality/performance validation and canary rollback.
 
-No cluster, ROCm, RDMA or failover behavior is represented as real hardware
-measurement on this Mac. A feature moves to "implemented" only with code and
+No multi-host cluster, ROCm or RDMA behavior is represented as real hardware
+measurement on this Mac. The v0.7 workers are separate supervised processes that
+share one Apple GPU. A feature moves to "implemented" only with code and
 appropriate validation evidence recorded in `WORK_LOG.md`.

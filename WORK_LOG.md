@@ -266,3 +266,44 @@ A real 616 MiB `.gputrace` was captured for one bounded 16-token request; its
 Evidence: `results/v06_serial_vs_fixed4/`, `results/v06_fixed4_vs_adaptive4/`,
 `results/v06_context_output_matrix_run.json`, `results/v06_adaptive_*_traffic*`,
 `results/v06_experiment_matrix.json`, and `results/v06_kernel_profile.json`.
+
+## v0.7 local cluster control plane — 2026-10-19
+
+Implemented an aiohttp control plane and worker registry with capacity-aware and
+round-robin placement. Eligibility accounts for readiness, stale heartbeats,
+draining, execution and queue slots, estimated KV reservations, model identity and
+artifact SHA-256. Added bounded placement/lifecycle audit history, Prometheus
+cluster metrics, authenticated non-loopback operation and strict worker URL
+validation to keep registration from becoming an unrestricted proxy.
+
+Added worker drain/removal/heartbeat APIs, compatibility generation proxying and
+placement response metadata. Requests are never retried after worker dispatch. A
+mid-stream connection loss emits a terminal `worker_transport_error` with the
+original worker request ID and selected placement. Added `tensorpilot-cluster` to
+own multiple existing restart supervisors and gate the control plane on readiness,
+plus `tensorpilot-cluster-compare` to reject unmatched workloads, repetitions and
+model artifacts.
+
+Validation passes 141 source tests and Ruff. Tests cover fair ties, reservations,
+stale/drain/model/artifact/memory exclusion, registration and authentication
+boundaries, route accounting, lifecycle history, mid-stream failure and the
+no-replay invariant. Exact installed-wheel validation is part of the release
+checkpoint.
+
+Real MLX validation used two adaptive workers with the same artifact SHA-256.
+Initial load completed 20/20 requests and 1,280 tokens, split 12/8 across workers.
+After draining worker 1, 6/6 requests selected worker 2. Killing worker 2 after its
+first token yielded the expected terminal transport error without replay; a new
+request completed on worker 1, and the restarted worker 2 appeared with a new
+instance ID.
+
+Three single-process and three two-process repetitions completed 180/180 requests.
+Two local worker processes measured +2.97% median throughput, -20.95% P50 latency,
++33.97% P95 latency, +23.31% P95 TTFT and +76.68% P95 inter-token latency relative
+to the direct single process. Positive latency percentages are regressions. Both
+workers share one Apple M5 GPU, so this does not demonstrate cluster scaling.
+
+Evidence: `results/v07_two_worker_load.json`, `results/v07_drain_load.json`,
+`results/v07_inflight_worker_crash.json`, `results/v07_cluster_health_recovered.json`,
+`results/v07_single_worker_run*.json`, `results/v07_two_worker_run*.json`,
+`results/v07_cluster_comparison.json` and `results/v07_final_cluster_*`.

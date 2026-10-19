@@ -2,7 +2,9 @@
 
 ```mermaid
 flowchart LR
-    App[Application / load generator] --> HTTP[Versioned HTTP API]
+    App[Application / load generator] --> Control[Optional cluster control plane]
+    Control --> HTTP[Versioned worker HTTP API]
+    App --> HTTP
     HTTP --> Validate[Validate and authenticate]
     Validate --> Admit[Bounded admission]
     Admit --> Queue[FIFO or shortest-budget + aging]
@@ -17,6 +19,27 @@ flowchart LR
     HTTP --> Ops[Request logs / Prometheus / probes]
     Worker --> Ops
 ```
+
+## Cluster control plane
+
+`control_plane.py` proxies the worker NDJSON protocol without owning a model.
+`routing.py` owns the worker registry, health state, drain state, reservations and
+bounded audit history. `cluster.py` starts one restart supervisor per worker, waits
+for readiness and then starts the control plane. Each worker still has a single
+model-owner thread and its own admission boundary.
+
+Capacity-aware placement excludes stale, unhealthy, draining, incompatible and
+full workers. It sorts eligible workers by load ratio, estimated reservation
+pressure, assignment count and worker ID. A reservation is created before proxy
+dispatch and released in a `finally` block. Model and artifact constraints are
+placement inputs and are not forwarded to the worker generation endpoint.
+
+The control plane never retries a request after dispatch because the worker may
+have generated tokens before the connection failed. A mid-stream worker loss
+therefore emits one terminal `worker_transport_error` event containing the chosen
+placement and original worker request ID. A caller can choose to retry, but the
+service cannot promise exactly-once inference without durable request identity and
+worker-side deduplication.
 
 ## Ownership and concurrency
 

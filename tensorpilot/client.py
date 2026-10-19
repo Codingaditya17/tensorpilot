@@ -36,8 +36,8 @@ class Client:
             raise RuntimeError("Use Client inside 'async with'")
         if type(timeout_s) not in (int, float) or not math.isfinite(timeout_s) or not 0 < timeout_s <= 120:
             raise TensorPilotError("invalid_request", "timeout_s must be finite and in (0, 120]")
-        if type(max_tokens) is not int or not 1 <= max_tokens <= 256:
-            raise TensorPilotError("invalid_request", "max_tokens must be an integer in 1..256")
+        if type(max_tokens) is not int or not 1 <= max_tokens <= 512:
+            raise TensorPilotError("invalid_request", "max_tokens must be an integer in 1..512")
         request_id = None
         try:
             async with self.session.post(
