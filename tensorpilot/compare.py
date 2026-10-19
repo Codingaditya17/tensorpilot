@@ -8,7 +8,9 @@ import statistics
 from .reporting import write_json
 
 MEASURES = ("completed_output_tokens_per_s", "p50_client_latency_s", "p95_client_latency_s",
-            "p99_client_latency_s", "p95_client_ttft_s", "p95_queue_wait_s", "max_queue_wait_s")
+            "p99_client_latency_s", "p95_client_ttft_s", "p95_queue_wait_s", "max_queue_wait_s",
+            "p95_inter_token_latency_s", "median_request_observed_prefill_execution_s",
+            "median_request_observed_decode_execution_s")
 
 
 def _execution_signature(server):
@@ -101,7 +103,7 @@ def compare_reports(reports, baseline=None, candidate=None, *, axis="scheduler")
             "interpretation": "Relative changes compare medians of per-run metrics. Negative latency change is lower latency; positive throughput change is higher throughput. Small repeated runs do not establish statistical significance or generalize to other workloads."}
 
 
-def regression_gate(comparison, max_p95_regression):
+def regression_gate(comparison, max_p95_regression, max_throughput_regression=None):
     if not math.isfinite(max_p95_regression) or max_p95_regression < 0:
         raise ValueError("regression threshold must be finite and nonnegative")
     groups = comparison.get("by_variant", comparison.get("by_policy"))
@@ -117,7 +119,16 @@ def regression_gate(comparison, max_p95_regression):
         reasons.append("candidate has more failed requests")
     if candidate["rejected_requests"] > base["rejected_requests"]:
         reasons.append("candidate has more rejected requests")
-    return {"passed": not reasons, "max_p95_regression": max_p95_regression, "reasons": reasons}
+    throughput_change = comparison["relative_change"]["overall"]["completed_output_tokens_per_s"]
+    if max_throughput_regression is not None:
+        if not math.isfinite(max_throughput_regression) or max_throughput_regression < 0:
+            raise ValueError("throughput regression threshold must be finite and nonnegative")
+        if throughput_change is None:
+            reasons.append("insufficient successful throughput measurements")
+        elif throughput_change < -max_throughput_regression:
+            reasons.append("throughput exceeds the allowed regression")
+    return {"passed": not reasons, "max_p95_regression": max_p95_regression,
+            "max_throughput_regression": max_throughput_regression, "reasons": reasons}
 
 
 def main():
@@ -125,6 +136,7 @@ def main():
     parser.add_argument("reports", nargs="+")
     parser.add_argument("--output", default="results/comparison.json")
     parser.add_argument("--max-p95-regression", type=float)
+    parser.add_argument("--max-throughput-regression", type=float)
     parser.add_argument("--axis", choices=("scheduler", "execution_mode"), default="scheduler")
     parser.add_argument("--baseline")
     parser.add_argument("--candidate")
@@ -133,8 +145,9 @@ def main():
         comparison = compare_reports([json.loads(Path(path).read_text()) for path in args.reports],
                                      args.baseline, args.candidate, axis=args.axis)
         comparison["source_reports"] = args.reports
-        if args.max_p95_regression is not None:
-            comparison["gate"] = regression_gate(comparison, args.max_p95_regression)
+        if args.max_p95_regression is not None or args.max_throughput_regression is not None:
+            comparison["gate"] = regression_gate(comparison, args.max_p95_regression or 0,
+                                                 args.max_throughput_regression)
     except (ValueError, KeyError) as exc:
         parser.error(str(exc))
     write_json(args.output, comparison)

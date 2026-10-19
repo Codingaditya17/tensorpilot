@@ -10,7 +10,7 @@ import pytest
 from tensorpilot.artifacts import artifact_fingerprint, resolve_model
 from tensorpilot.compare import compare_reports, regression_gate
 from tensorpilot.experiment import ensure_port_free, run_order
-from tensorpilot.load import run
+from tensorpilot.load import run, runtime_profile_delta
 from tensorpilot.reporting import write_json
 from tensorpilot.workloads import build_stress_workload, build_workload, fingerprint, validate_workload
 
@@ -24,6 +24,18 @@ def test_mixed_plan_is_seeded_with_fixed_composition():
     assert sum(item["class"] == "short" for item in first) == 18
     assert {item["max_tokens"] for item in first} == {16, 64, 128}
     validate_workload(first)
+
+
+def test_runtime_profile_delta_does_not_double_count_shared_steps():
+    before = {"prefill_steps": 2, "decode_steps": 4, "prefill_execution_s": .1,
+              "decode_execution_s": .3, "occupancy_sum": 12, "steps": 6}
+    after = {"prefill_steps": 3, "decode_steps": 8, "prefill_execution_s": .15,
+             "decode_execution_s": .5, "occupancy_sum": 24, "steps": 11}
+    delta = runtime_profile_delta(before, after)
+    assert delta["prefill_steps"] == 1
+    assert delta["decode_steps"] == 4
+    assert delta["mean_occupancy"] == pytest.approx(12 / 5)
+    assert runtime_profile_delta({}, after) is None
 
 
 def test_stress_workload_has_controlled_context_and_output_shape():
@@ -147,6 +159,13 @@ def test_regression_gate_rejects_faster_but_less_available_candidate():
     result = regression_gate(compare_reports([left, right]), .1)
     assert not result["passed"]
     assert result["reasons"] == ["candidate has more rejected requests"]
+
+
+def test_regression_gate_can_fail_throughput_regression():
+    left, right = report("fifo", throughput=100), report("shortest-budget", throughput=89)
+    result = regression_gate(compare_reports([left, right]), .2, .1)
+    assert not result["passed"]
+    assert result["reasons"] == ["throughput exceeds the allowed regression"]
 
 
 @pytest.mark.parametrize("partial", ["duration", "recovery"])

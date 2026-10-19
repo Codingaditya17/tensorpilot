@@ -105,7 +105,9 @@ async def run_experiment(args):
     revision = args.revision
     reports = []
     comparison_kind = getattr(args, "comparison", "scheduler")
-    variants = ("serial", "batch") if comparison_kind == "execution" else ("fifo", "shortest-budget")
+    variants = ((getattr(args, "execution_baseline", "serial"),
+                 getattr(args, "execution_candidate", "batch"))
+                if comparison_kind == "execution" else ("fifo", "shortest-budget"))
     try:
         for repeat, variant in run_order(args.repeat, variants):
             policy = "fifo" if comparison_kind == "execution" else variant
@@ -133,7 +135,7 @@ async def run_experiment(args):
                         if not revision:
                             raise ValueError("experiment requires an immutable model revision")
                     warmup_args = SimpleNamespace(url=f"http://127.0.0.1:{args.port}", requests=len(warmup_plan),
-                                                  concurrency=min(args.batch_size, len(warmup_plan), args.queue_size) if execution == "batch" else 1,
+                                                  concurrency=min(args.batch_size, len(warmup_plan), args.queue_size) if execution != "serial" else 1,
                                                   rate=0, max_tokens=128, timeout=args.timeout,
                                                   workload_file=str(warmup_path), seed=args.seed, workload="mixed")
                     warmup_report = await run_load(warmup_args)
@@ -162,7 +164,9 @@ async def run_experiment(args):
                           f"{summary['completed_output_tokens_per_s']:.1f} output tokens/s", flush=True)
                 finally:
                     await stop_process(process)
-        comparison = compare_reports(reports, axis="execution_mode" if comparison_kind == "execution" else "scheduler")
+        comparison = compare_reports(
+            reports, variants[0], variants[1],
+            axis="execution_mode" if comparison_kind == "execution" else "scheduler")
         comparison["source_reports"] = [run["report"] for run in manifest["runs"]]
         write_json(output / "comparison.json", comparison)
         manifest["status"] = "completed"
@@ -193,8 +197,10 @@ def main():
     parser.add_argument("--memory-gib", type=float, default=6)
     parser.add_argument("--max-queue-wait", type=float, default=1)
     parser.add_argument("--comparison", choices=("scheduler", "execution"), default="scheduler")
-    parser.add_argument("--execution", choices=("serial", "batch"), default="serial",
+    parser.add_argument("--execution", choices=("serial", "batch", "adaptive"), default="serial",
                         help="execution mode for scheduler comparisons")
+    parser.add_argument("--execution-baseline", choices=("serial", "batch", "adaptive"), default="serial")
+    parser.add_argument("--execution-candidate", choices=("serial", "batch", "adaptive"), default="batch")
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--prefill-step-size", type=int, default=256)
     parser.add_argument("--port", type=int, default=8080)
@@ -207,6 +213,8 @@ def main():
         parser.error("comparison limits: requests <= 10000, concurrency <= 256")
     if not 1 <= args.batch_size <= 8 or not 1 <= args.prefill_step_size <= 2048:
         parser.error("batch-size must be in 1..8; prefill-step-size in 1..2048")
+    if args.comparison == "execution" and args.execution_baseline == args.execution_candidate:
+        parser.error("execution baseline and candidate must differ")
     if not math.isfinite(args.rate) or args.rate < 0 or not 0 < args.timeout <= 120:
         parser.error("rate must be finite and nonnegative; timeout must be in (0, 120]")
     if not 0 < args.memory_gib <= 8 or not math.isfinite(args.max_queue_wait) or args.max_queue_wait <= 0:

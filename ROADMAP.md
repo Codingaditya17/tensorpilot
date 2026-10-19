@@ -33,6 +33,11 @@
 - [x] Opt-in real MLX continuous batching with independent sequence state,
       cancellation, deadlines, failure isolation and matched throughput evidence.
 - [ ] Broaden batching capacity/context/model coverage and sustained memory testing.
+- [x] Synchronized prefill/decode timing and per-request inter-token telemetry.
+- [x] Explainable adaptive width from demand, queue latency and KV reservation pressure.
+- [x] Reproducible 128/512/2048 by 128/256/512 workload matrix with safe preflight.
+- [x] Fixed-width/adaptive comparisons and latency/throughput regression gates.
+- [x] Bounded Apple Metal `.gputrace` capture with a provenance manifest.
 
 ## Separate future modules
 

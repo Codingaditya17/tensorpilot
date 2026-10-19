@@ -30,6 +30,10 @@ class Scheduler:
     def empty(self):
         return not self._pending
 
+    def oldest_wait_s(self):
+        jobs = [job for job in self._pending if job is not None]
+        return max(0.0, self.clock() - min(job.admitted for job in jobs)) if jobs else 0.0
+
     def put_nowait(self, job):
         if self.qsize() >= self.capacity:
             raise asyncio.QueueFull

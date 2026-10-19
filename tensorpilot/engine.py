@@ -77,6 +77,7 @@ class Engine:
         self.watchdog = None
         self.last_memory_sample_s = None
         self.last_memory_sample = None
+        self.startup_profile = None
         self._close_task = None
 
     @property
@@ -87,6 +88,10 @@ class Engine:
     def active_count(self):
         return int(self.active is not None)
 
+    def runtime_profile(self):
+        return {"measurement_source": "model_thread_wall_clock",
+                "note": "serial phase split is per-request; see terminal phase_profile"}
+
     async def call(self, function, *args):
         self.call_started_s = time.perf_counter()
         try:
@@ -95,15 +100,27 @@ class Engine:
             self.call_started_s = None
 
     async def start(self, warmup=True):
+        startup_started = time.perf_counter()
         try:
+            load_started = time.perf_counter()
             self.backend = await self.call(self.factory)
+            load_s = time.perf_counter() - load_started
+            warmup_s = 0.0
             if warmup:
+                warmup_started = time.perf_counter()
                 await self.call(lambda: list(self.backend.stream("Hello", 8)))
+                warmup_s = time.perf_counter() - warmup_started
             self._observe_memory(await self.call(self.backend.memory))
+            prepare_started = time.perf_counter()
             await self._prepare_execution()
+            prepare_s = time.perf_counter() - prepare_started
         except BaseException:
             self.pool.shutdown(wait=False)
             raise
+        self.startup_profile = {"measurement_source": "model_thread_wall_clock",
+                                "model_load_s": load_s, "warmup_s": warmup_s,
+                                "execution_prepare_s": prepare_s,
+                                "total_startup_s": time.perf_counter() - startup_started}
         self.worker = asyncio.create_task(self.run(), name="tensorpilot-model-worker")
         self.worker.add_done_callback(self._worker_stopped)
         self.watchdog = asyncio.create_task(self._monitor_progress(), name="tensorpilot-worker-watchdog")
@@ -255,7 +272,7 @@ class Engine:
     async def _execute(self, job):
         iterator = None
         started = time.perf_counter()
-        token_times, sampled = [], 0
+        token_times, sampled, advance_times = [], 0, []
         profiles = []
         prompt_tokens, finish_reason = None, None
         terminal = None
@@ -271,7 +288,9 @@ class Engine:
             iterator = await self.call(lambda: iter(self.backend.stream(job.prompt, job.max_tokens)))
             while True:
                 self._check_deadline(job)
+                advance_started = time.perf_counter()
                 token = await self.call(advance, iterator)
+                advance_times.append(time.perf_counter() - advance_started)
                 self._check_deadline(job)
                 now = time.perf_counter()
                 if token is None:
@@ -296,7 +315,14 @@ class Engine:
                         "ttft_s": token_times[0] if token_times else None,
                         "token_times_s": token_times, "generated_tokens": len(token_times),
                         "sampled_tokens_including_eos": sampled, "scheduler": self.queue.policy,
-                        "schedule_reason": job.schedule_reason, **memory}
+                        "schedule_reason": job.schedule_reason,
+                        "inter_token_latency_s": [later - earlier for earlier, later in zip(token_times, token_times[1:])],
+                        "phase_profile": {"measurement_source": "model_thread_wall_clock",
+                                          "prefill_plus_first_decode_s": advance_times[0] if advance_times else None,
+                                          "subsequent_decode_s": advance_times[1:]},
+                        "estimated_kv_bytes": job.resource_estimate.kv_bytes,
+                        "estimated_total_tokens_upper_bound": job.resource_estimate.total_tokens_upper_bound,
+                        **memory}
             if profiles:
                 terminal["memory_profile"] = profiles
         except asyncio.CancelledError:

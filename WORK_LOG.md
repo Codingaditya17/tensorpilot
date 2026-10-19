@@ -232,3 +232,37 @@ verified worker was SIGKILLed, the client received `transport_error`, a new read
 instance appeared, and an eight-token recovery request completed. Evidence is in
 results/v05_soak_15m_run2*, results/v05_inflight_crash_recovery.json and
 docs/v05-runtime-hardening.md.
+
+## v0.6 GPU runtime intelligence — 2026-10-18
+
+Added synchronized model-thread phase timing, batch-wide counters, per-request
+TTFT/inter-token profiles, startup phase timing, estimated KV provenance and
+Prometheus occupancy/step metrics. Added a deterministic adaptive controller with
+live decision explanations and fixed/FIFO baselines preserved. Added a bounded
+128/512/2048 by 128/256/512 matrix generator, 512-token service support,
+throughput regression gates and a real Apple Metal capture command.
+
+Correctness validation: 123 tests pass and Ruff is clean. New coverage includes
+traffic-dependent width decisions, memory-pressure caps, reservation cleanup,
+prefill cancellation isolation, live health state, matrix safety and runtime
+counter deltas. Existing v0.5 compatibility, crash supervision and stream tests
+remain in the suite.
+
+Real MLX comparisons used three counterbalanced repetitions per pair. Serial vs
+fixed width four completed 180/180 requests; fixed batching delivered +137.3%
+median throughput and -39.4% median P95 latency, with +375.1% P95 inter-token
+latency. Fixed width four vs adaptive max four completed 180/180; throughput was
++0.13% and P95 latency -0.02%, effectively parity because sustained demand kept
+both at width four. No adaptive speedup claim is made.
+
+Changing traffic selected width one then width eight with zero failures. The
+nine-case context/output run recorded actual inputs 120/504/2040 and output caps
+128/256/512; all completed, with 2,688 output tokens. Synchronized batch-wide
+work was 0.065 s prefill and 6.954 s decode; mean occupancy was 1.73. Maximum MLX
+active allocation was 339,040,188 bytes and process-lifetime peak 614,778,088.
+A real 616 MiB `.gputrace` was captured for one bounded 16-token request; its
+27.2 s captured timing is diagnostic overhead and excluded from performance claims.
+
+Evidence: `results/v06_serial_vs_fixed4/`, `results/v06_fixed4_vs_adaptive4/`,
+`results/v06_context_output_matrix_run.json`, `results/v06_adaptive_*_traffic*`,
+`results/v06_experiment_matrix.json`, and `results/v06_kernel_profile.json`.

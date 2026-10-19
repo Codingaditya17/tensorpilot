@@ -84,7 +84,7 @@ def main():
     parser.add_argument("--backoff", type=float, default=1)
     parser.add_argument("--lifecycle-log", default="results/worker_lifecycle.jsonl")
     parser.add_argument("--worker-log", default="results/supervised_worker.log")
-    parser.add_argument("--execution", choices=("serial", "batch"), default="serial")
+    parser.add_argument("--execution", choices=("serial", "batch", "adaptive"), default="serial")
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--queue-size", type=int, default=8)
     parser.add_argument("--memory-gib", type=float, default=6)

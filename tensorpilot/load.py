@@ -36,6 +36,9 @@ def summarize(records, wall_s):
     rejected = sum(r.get("error_code") == "overloaded" for r in records)
     latencies = [r["client_elapsed_s"] for r in completed]
     tokens = sum(r["server"]["generated_tokens"] for r in completed)
+    inter_token = [value for record in completed
+                   for value in record["server"].get("inter_token_latency_s", [])]
+    phase_profiles = [record["server"].get("phase_profile", {}) for record in completed]
     result = {
         "successful_requests": len(completed), "failed_requests": len(records) - len(completed),
         "rejected_requests": rejected,
@@ -47,6 +50,13 @@ def summarize(records, wall_s):
         "p95_client_ttft_s": percentile([r["client_ttft_s"] for r in completed
                                          if r["client_ttft_s"] is not None], .95),
         "p95_queue_wait_s": percentile([r["server"]["queue_wait_s"] for r in completed], .95),
+        "p95_inter_token_latency_s": percentile(inter_token, .95),
+        "median_request_observed_prefill_execution_s": percentile(
+            [profile["prefill_execution_s"] for profile in phase_profiles
+             if profile.get("prefill_execution_s") is not None], .5),
+        "median_request_observed_decode_execution_s": percentile(
+            [profile["decode_execution_s"] for profile in phase_profiles
+             if profile.get("decode_execution_s") is not None], .5),
         "max_queue_wait_s": max((r["server"]["queue_wait_s"] for r in completed), default=None),
         "p95_dispatch_lag_s": percentile([r.get("dispatch_lag_s", 0) for r in records], .95),
         "partial_output_tokens_on_failure": sum(r.get("received_output_tokens", 0)
@@ -58,6 +68,21 @@ def summarize(records, wall_s):
 def class_summaries(records, wall_s):
     return {label: summarize([record for record in records if record["class"] == label], wall_s)
             for label in sorted({record["class"] for record in records})}
+
+
+def runtime_profile_delta(before, after):
+    """Return batch-wide synchronized totals for only this load window."""
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return None
+    numeric = ("prefill_steps", "decode_steps", "prefill_execution_s",
+               "decode_execution_s", "occupancy_sum", "steps")
+    if not all(type(before.get(key)) in (int, float) and type(after.get(key)) in (int, float)
+               for key in numeric):
+        return None
+    delta = {key: after[key] - before[key] for key in numeric}
+    delta["mean_occupancy"] = delta["occupancy_sum"] / delta["steps"] if delta["steps"] else None
+    delta["measurement_source"] = "difference_of_synchronized_runtime_counters"
+    return delta
 
 
 async def request_one(session, url, index, args, scheduled, experiment_start, item):
@@ -120,8 +145,8 @@ def validate_config(args):
     for name in ("requests", "concurrency", "max_tokens"):
         if type(getattr(args, name)) is not int or getattr(args, name) < 1:
             raise ValueError(f"{name} must be a positive integer")
-    if args.requests > 100000 or args.concurrency > 256 or args.max_tokens > 256:
-        raise ValueError("limits: requests <= 100000, concurrency <= 256, max_tokens <= 256")
+    if args.requests > 100000 or args.concurrency > 256 or args.max_tokens > 512:
+        raise ValueError("limits: requests <= 100000, concurrency <= 256, max_tokens <= 512")
     if not math.isfinite(args.rate) or args.rate < 0 or not math.isfinite(args.timeout) or not 0 < args.timeout <= 120:
         raise ValueError("rate must be finite and nonnegative; timeout must be in (0, 120]")
     duration = getattr(args, "duration_s", None)
@@ -217,6 +242,15 @@ async def run(args):
                 journal.finish(status, wall_s)
         metadata["stop_reason"] = ("request_count_completed" if duration is None else
                                    "request_cap_reached" if len(records) >= limit else "duration_elapsed")
+        try:
+            async with session.get(url + "/health", timeout=aiohttp.ClientTimeout(total=10)) as response:
+                response.raise_for_status()
+                metadata["server_after"] = await response.json()
+        except (aiohttp.ClientError, TimeoutError, ValueError):
+            metadata["server_after"] = None
+    metadata["runtime_profile_delta"] = runtime_profile_delta(
+        server.get("runtime_profile"),
+        (metadata.get("server_after") or {}).get("runtime_profile"))
     return {"schema_version": 3, "metadata": metadata,
             "summary": summarize(records, wall_s), "by_class": class_summaries(records, wall_s),
             "requests": sorted(records, key=lambda r: r["index"])}

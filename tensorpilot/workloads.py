@@ -42,8 +42,8 @@ def build_stress_workload(requests, *, prompt_repeats=32, output_tokens=64):
         raise ValueError("requests must be in 1..100000")
     if type(prompt_repeats) is not int or not 1 <= prompt_repeats <= 256:
         raise ValueError("prompt_repeats must be in 1..256")
-    if type(output_tokens) is not int or not 1 <= output_tokens <= 256:
-        raise ValueError("output_tokens must be in 1..256")
+    if type(output_tokens) is not int or not 1 <= output_tokens <= 512:
+        raise ValueError("output_tokens must be in 1..512")
     observation = "GPU inference needs bounded memory and predictable recovery. "
     prompt = "Summarize these observations without adding facts:\n" + observation * prompt_repeats
     if len(prompt.encode()) > 16384:
@@ -61,8 +61,8 @@ def validate_workload(plan, *, max_requests=100000):
             raise ValueError("each workload item requires prompt, max_tokens and class")
         if not isinstance(item["prompt"], str) or not item["prompt"].strip() or len(item["prompt"].encode()) > 16384:
             raise ValueError("workload prompt must contain 1..16384 UTF-8 bytes")
-        if type(item["max_tokens"]) is not int or not 1 <= item["max_tokens"] <= 256:
-            raise ValueError("workload max_tokens must be an integer in 1..256")
+        if type(item["max_tokens"]) is not int or not 1 <= item["max_tokens"] <= 512:
+            raise ValueError("workload max_tokens must be an integer in 1..512")
         if not isinstance(item["class"], str) or not 1 <= len(item["class"]) <= 32:
             raise ValueError("workload class must contain 1..32 characters")
     return plan

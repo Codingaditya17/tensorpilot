@@ -25,6 +25,8 @@ multiple independent sequences through that thread.
 - Browser dashboard at `/` with live readiness, queue, device and streaming inference.
 - Conservative KV-cache reservation admission, separate from measured MLX memory.
 - Guarded 15/30/60-minute soaks, exact token gates and worker restart supervision.
+- Synchronized prefill/decode telemetry, adaptive batch width, workload-matrix
+  preflight, throughput/latency gates and bounded Apple Metal kernel capture.
 
 Real MLX inference and CPU behavior tests are separate evidence. A scheduling
 policy is experimental until measured against a baseline; improvements to one
@@ -58,6 +60,12 @@ Enable measured, experimental continuous batching with
 Each sequence has independent output budgets, detokenization, cancellation and
 deadlines. A full response buffer sheds that sequence so other clients can
 continue. See [batching design and results](docs/batching-design.md).
+
+Enable the v0.6 deterministic adaptive controller with
+`tensorpilot-server --execution adaptive --batch-size 4 --offline`. It changes
+the target width from queue demand, oldest wait and estimated reservation pressure.
+Inspect its live explanation in `/health` and see
+[GPU runtime intelligence](docs/v06-gpu-runtime.md) for measurements and limits.
 
 Open `http://127.0.0.1:8080/` for the local dashboard. For automatic recovery,
 run `tensorpilot-supervisor --offline`; it owns the worker process, requires
@@ -127,6 +135,9 @@ Select only measured reports, excluding `*.warmup.json`. The comparator refuses
 mismatched workloads, model artifacts, environment/configuration, or unbalanced
 repetitions. A failed gate exits with status 1. Small sample sizes still limit
 conclusions; a passing gate is not proof of general performance superiority.
+Use `--max-throughput-regression 0.05` to gate throughput as well as latency and
+availability. `tensorpilot-matrix` emits preflighted v0.6 configurations, while
+`tensorpilot-kernel-capture` records a bounded Apple `.gputrace` for Instruments.
 
 ## Architecture and engineering record
 
@@ -142,7 +153,7 @@ The historical sequential benchmark is preserved as `tensorpilot.bench`;
 ## Current boundaries
 
 This is a single-node inference system with serial execution by default and
-opt-in MLX batching. It has no distributed GPU execution, per-tenant isolation,
+opt-in fixed or adaptive MLX batching. It has no distributed GPU execution, per-tenant isolation,
 durable request queue or transparent in-flight replay. Its supervisor restarts a
 failed process after downtime. Allocator limits and context caps do not measure
 all macOS memory pressure, and a stuck GPU operation can delay cancellation and

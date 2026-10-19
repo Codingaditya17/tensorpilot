@@ -24,6 +24,7 @@ from .metrics import Metrics
 from .scheduler import Scheduler
 from .ui import DASHBOARD_HTML
 from .admission import ResourceAdmission
+from .adaptive import AdaptiveBatchController
 
 ENGINE = web.AppKey("engine", Engine)
 METRICS = web.AppKey("metrics", Metrics)
@@ -36,26 +37,33 @@ def create_app(factory, *, queue_size=8, max_tokens=256, max_timeout=120,
                warmup=True, metadata=None, api_key=None, scheduler="fifo", max_queue_wait_s=1.0,
                instance_id=None, stall_timeout_s=30.0, execution="serial", batch_size=2,
                prefill_step_size=256, batch_adapter_factory=None,
-               admission_memory_bytes=512 * 1024**2, admission_bytes_per_token=16 * 1024):
+               admission_memory_bytes=512 * 1024**2, admission_bytes_per_token=16 * 1024,
+               adaptive_latency_target_s=.25, adaptive_memory_soft_limit=.85,
+               adaptive_memory_hard_limit=.95):
     metrics = Metrics()
     admission = ResourceAdmission(admission_memory_bytes, bytes_per_token=admission_bytes_per_token)
     options = {"metrics": metrics, "scheduler": scheduler, "admission": admission,
                "max_queue_wait_s": max_queue_wait_s, "stall_timeout_s": stall_timeout_s}
-    if execution == "batch":
+    if execution in ("batch", "adaptive"):
         options.update(max_batch_size=batch_size, prefill_step_size=prefill_step_size)
+        if execution == "adaptive":
+            options["adaptive_controller"] = AdaptiveBatchController(
+                batch_size, latency_target_s=adaptive_latency_target_s,
+                memory_soft_limit=adaptive_memory_soft_limit,
+                memory_hard_limit=adaptive_memory_hard_limit)
         if batch_adapter_factory is not None:
             options["adapter_factory"] = batch_adapter_factory
         engine = BatchEngine(factory, queue_size, **options)
     elif execution == "serial":
         engine = Engine(factory, queue_size, **options)
     else:
-        raise ValueError("execution must be serial or batch")
+        raise ValueError("execution must be serial, batch or adaptive")
     service_metadata = {**(metadata or {}), "instance_id": instance_id or uuid.uuid4().hex,
                         "scheduler": scheduler, "max_queue_wait_s": max_queue_wait_s,
                         "service_version": __version__}
     service_metadata["stall_timeout_s"] = stall_timeout_s
     service_metadata.update(execution_mode=execution, max_active_sequences=engine.max_active_sequences,
-                            prefill_step_size=prefill_step_size if execution == "batch" else 2048)
+                            prefill_step_size=prefill_step_size if execution != "serial" else 2048)
 
     def error(request, status, code, message, headers=None):
         return web.json_response({"error": {"code": code, "message": message},
@@ -140,6 +148,10 @@ def create_app(factory, *, queue_size=8, max_tokens=256, max_timeout=120,
                                   "execution_concurrency": engine.max_active_sequences,
                                   "admission": engine.admission.snapshot(),
                                   "last_measured_memory": engine.last_memory_sample,
+                                  "startup_profile": engine.startup_profile,
+                                  "runtime_profile": engine.runtime_profile(),
+                                  "adaptive_policy": (engine.adaptive_controller.snapshot()
+                                                      if getattr(engine, "adaptive_controller", None) else None),
                                   "memory_sample_age_s": (time.perf_counter() - engine.last_memory_sample_s
                                                           if engine.last_memory_sample_s is not None else None),
                                   **service_metadata})
@@ -221,10 +233,18 @@ def main():
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--queue-size", type=int, default=8)
-    parser.add_argument("--execution", choices=("serial", "batch"), default="serial",
+    parser.add_argument("--max-output-tokens", type=int, default=512,
+                        help="service output cap (1..512)")
+    parser.add_argument("--execution", choices=("serial", "batch", "adaptive"), default="serial",
                         help="batch is opt-in real continuous MLX batching")
     parser.add_argument("--batch-size", type=int, default=2, help="maximum active batch sequences (1..8)")
     parser.add_argument("--prefill-step-size", type=int, default=256, help="batch prefill segmentation (1..2048)")
+    parser.add_argument("--adaptive-latency-target", type=float, default=.25,
+                        help="oldest queue wait that triggers maximum adaptive width")
+    parser.add_argument("--adaptive-memory-soft-limit", type=float, default=.85,
+                        help="estimated reservation pressure that caps adaptive width at two")
+    parser.add_argument("--adaptive-memory-hard-limit", type=float, default=.95,
+                        help="estimated reservation pressure that caps adaptive width at one")
     parser.add_argument("--memory-gib", type=float, default=6)
     parser.add_argument("--admission-memory-mib", type=int, default=512,
                         help="estimated KV reservation budget; separate from measured MLX memory")
@@ -236,8 +256,9 @@ def main():
     parser.add_argument("--stall-timeout", type=float, default=30,
                         help="mark backend unhealthy if one model-thread call exceeds this duration")
     args = parser.parse_args()
-    if args.queue_size < 1 or not 0 < args.memory_gib <= 8:
-        parser.error("queue-size must be positive; memory-gib must be in (0, 8]")
+    if (args.queue_size < 1 or not 0 < args.memory_gib <= 8 or
+            not 1 <= args.max_output_tokens <= 512):
+        parser.error("queue-size must be positive; memory-gib in (0, 8]; output cap in 1..512")
     if args.admission_memory_mib < 1 or args.admission_bytes_per_token < 1:
         parser.error("admission memory and bytes-per-token must be positive")
     if not math.isfinite(args.max_queue_wait) or args.max_queue_wait <= 0:
@@ -246,6 +267,9 @@ def main():
         parser.error("stall-timeout must be finite and positive")
     if not 1 <= args.batch_size <= 8 or not 1 <= args.prefill_step_size <= 2048:
         parser.error("batch-size must be in 1..8; prefill-step-size in 1..2048")
+    if (not math.isfinite(args.adaptive_latency_target) or args.adaptive_latency_target <= 0 or
+            not 0 < args.adaptive_memory_soft_limit < args.adaptive_memory_hard_limit <= 1):
+        parser.error("adaptive target must be positive and 0 < soft memory limit < hard limit <= 1")
     if args.execution == "batch" and args.profile_memory:
         parser.error("--profile-memory is currently supported only by serial execution")
     api_key = os.environ.get("TENSORPILOT_API_KEY")
@@ -257,19 +281,23 @@ def main():
                 "server_platform": platform.platform(), "server_python": platform.python_version(),
                 "source_sha256": source_fingerprint(), "dependencies": dependency_versions(),
                 "memory_limit_bytes": int(args.memory_gib * 1024**3),
-                "max_prompt_tokens": 2048, "max_output_tokens": 256,
+                "max_prompt_tokens": 2048, "max_output_tokens": args.max_output_tokens,
                 "queue_capacity": args.queue_size, "sampling": "greedy",
                 "prompt_format": "raw text, tokenizer default special tokens"}
     app = create_app(lambda: MLXBackend(args.model, metadata["memory_limit_bytes"], 2048,
                                       revision=args.revision, offline=args.offline,
                                       profile_memory=args.profile_memory),
-                     queue_size=args.queue_size, metadata=metadata, api_key=api_key,
+                     queue_size=args.queue_size, max_tokens=args.max_output_tokens,
+                     metadata=metadata, api_key=api_key,
                      scheduler=args.scheduler, max_queue_wait_s=args.max_queue_wait,
                      instance_id=args.instance_id, stall_timeout_s=args.stall_timeout,
                      execution=args.execution, batch_size=args.batch_size,
                      prefill_step_size=args.prefill_step_size,
                      admission_memory_bytes=args.admission_memory_mib * 1024**2,
-                     admission_bytes_per_token=args.admission_bytes_per_token)
+                     admission_bytes_per_token=args.admission_bytes_per_token,
+                     adaptive_latency_target_s=args.adaptive_latency_target,
+                     adaptive_memory_soft_limit=args.adaptive_memory_soft_limit,
+                     adaptive_memory_hard_limit=args.adaptive_memory_hard_limit)
     web.run_app(app, host=args.host, port=args.port, handler_cancellation=True, access_log=None)
 
 

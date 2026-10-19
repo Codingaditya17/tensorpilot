@@ -32,6 +32,14 @@ class Metrics:
         self.batch_steps = Counter("tensorpilot_batch_steps", "Shared batch prefill/decode steps", **options)
         self.decode_width = Histogram("tensorpilot_decode_batch_width", "Actual response count per nonempty batch decode step",
                                       buckets=(1, 2, 4, 8), **options)
+        self.batch_occupancy = Histogram("tensorpilot_batch_occupancy", "Active sequences at a measured batch step",
+                                         buckets=(1, 2, 4, 8), **options)
+        self.batch_step_seconds = Histogram("tensorpilot_batch_step_seconds",
+                                             "Synchronized model-thread step time by phase", ["phase"],
+                                             buckets=(.001, .005, .01, .025, .05, .1, .25, .5, 1, 2, 5), **options)
+        self.adaptive_width = Gauge("tensorpilot_adaptive_batch_width", "Latest adaptive target width", **options)
+        self.adaptive_decisions = Counter("tensorpilot_adaptive_decisions", "Adaptive width decisions by bounded reason",
+                                          ["reason", "width"], **options)
         self.queue_wait = Histogram("tensorpilot_queue_wait_seconds", "Admission to worker start, all dequeued jobs",
                                     buckets=(.001, .01, .05, .1, .25, .5, 1, 2, 5, 15, 60, 120), **options)
         self.ttft = Histogram("tensorpilot_ttft_seconds", "Admission to first non-EOS token, where observed",

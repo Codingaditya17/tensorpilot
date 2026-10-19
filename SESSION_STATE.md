@@ -1,21 +1,20 @@
 # Current engineering state
 
-TensorPilot v0.5.0 runtime hardening is active on branch
-`codex/runtime-platform`. A supervised serial/FIFO service exposes the dashboard
-at `http://127.0.0.1:8080/`; batching remains opt-in.
+TensorPilot v0.6.0 GPU runtime intelligence is implemented on branch
+`codex/runtime-platform`. The source adds synchronized phase telemetry,
+deterministic adaptive batching, workload-matrix preflight, throughput/latency
+gates, 512-token decode support and bounded Apple Metal capture.
 
-Implemented: browser dashboard, conservative KV reservation admission, separate
-estimated/actual memory telemetry, guarded soak presets, configurable stress
-workloads, pinned token-ID correctness, and readiness-gated bounded worker
-restart. The last complete suite passed 104 tests with Ruff clean.
+Validation currently passes 123 tests with Ruff clean. Real MLX evidence includes
+three matched repetitions of serial versus fixed width four and fixed width four
+versus adaptive width four, a changing-traffic width 1/8 run, a nine-case
+120/504/2040-token by 128/256/512-output matrix and a real `.gputrace`.
 
-Real evidence: serial/batch IDs matched for three pinned cases; constrained
-admission accepted one and rejected five without leaks; a SIGKILLed worker was
-restarted and served recovery traffic. The final in-flight crash produced an
-explicit transport error, a new ready instance and a successful next request.
-The 15-minute soak completed 3,650/3,650 requests with all 180 samples ready.
-See docs/v05-runtime-hardening.md and WORK_LOG.md.
+Measured fixed width four versus serial: +137.3% median throughput, -39.4% P95
+latency and +375.1% P95 inter-token latency. Adaptive maximum width four was at
+parity with fixed width four under sustained demand; no speedup claim is made.
+See `docs/v06-gpu-runtime.md` and `WORK_LOG.md`.
 
-Nothing is pushed or published. Prior release/evidence archives remain intact.
-The v0.5 wheel passed 104 tests outside the checkout without MLX. Remaining:
-record final checksums, package evidence and create a local Git checkpoint.
+The v0.5 service was stopped before v0.6 experiments. Final packaging, isolated
+wheel validation, local commit and restart of the persistent v0.6 supervisor are
+the remaining checkpoint steps. Nothing is pushed or published.

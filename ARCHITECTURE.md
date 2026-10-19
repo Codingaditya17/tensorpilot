@@ -6,7 +6,8 @@ flowchart LR
     HTTP --> Validate[Validate and authenticate]
     Validate --> Admit[Bounded admission]
     Admit --> Queue[FIFO or shortest-budget + aging]
-    Queue --> Worker[Single model-owner thread]
+    Queue --> Width[Serial / fixed / adaptive width]
+    Width --> Worker[Single model-owner thread]
     Worker --> MLX[MLX / Apple GPU]
     MLX --> Worker
     Worker --> Buffer[Bounded per-request event buffer]
@@ -23,6 +24,8 @@ flowchart LR
 `engine.py` owns request lifecycle and the sole model execution thread.
 `scheduler.py` owns bounded waiting capacity and next-job selection. `backend.py`
 is the MLX adapter and closes its underlying generator explicitly.
+`batch_engine.py` owns fixed/adaptive sequence execution and `adaptive.py` makes
+bounded, explainable width decisions without preempting active sequences.
 
 All model loading, warmup, tokenization, inference, generator advancement,
 cleanup and allocator inspection run on the model thread. The asyncio loop
@@ -62,7 +65,9 @@ in-process worker cannot forcibly interrupt a GPU call.
 
 Server timings use admission as zero. Queue wait ends at dispatch; TTFT includes
 queueing, tokenization and prefill. Client timings include transport/buffering.
-Output-token counters exclude EOS. No model-only kernel timing is claimed.
+Output-token counters exclude EOS. Batch phase timing is synchronized around
+`BatchGenerator.next()` and labels empty-response steps as prefill. It is not
+kernel attribution; `kernel_capture.py` creates an opt-in Metal trace for that.
 
 `artifacts.py` resolves model snapshots and hashes model/config/tokenizer contents.
 `environment.py` fingerprints package source and records runtime dependencies.
