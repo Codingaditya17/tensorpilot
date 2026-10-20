@@ -167,6 +167,20 @@ Remaining scope: real batching, durable serving queues, per-tenant identity,
 automatic process restart, broad model-quality evaluation, distributed/AMD GPU
 execution and cluster fault control. These are roadmap items, not completed claims.
 
+## v0.8.4 — control/data-plane separation — 2026-10-20
+
+- Added expiring route leases and moved stream proxying/backpressure/cancellation
+  into a separately runnable data plane. Preserved the integrated endpoint.
+- Added control-loop lag, active stream, proxy duration/chunk, lease completion and
+  expiry metrics. Control credentials are isolated from worker connections.
+- Added matched integrated/separated synthetic experiments: three trials each at
+  concurrency 128, 512 and 1,000, retaining raw request evidence.
+- Separation reduced saturated P95/P99 routing latency and recovery time, and all
+  three 1,000-concurrency trials completed without request failure. It also cut
+  throughput 44–45%, exposing the gateway/RPC path as the next bottleneck.
+- Validation: Ruff clean and 154 tests passed. This is one-Mac, GPU-free evidence;
+  no multi-host, GPU performance or production-readiness claim is made.
+
 
 ## Continuation — experimental batching adapter — 2026-10-18
 

@@ -1,6 +1,6 @@
 # Current engineering state
 
-TensorPilot v0.8.3 is implemented on `codex/v08-distributed-scale`. The immutable
+TensorPilot v0.8.4 is implemented on `codex/v08-distributed-scale`. The immutable
 v0.7 baseline is commit `675d1fb`; the first thousand-worker routing checkpoint is
 `40d031a`, and operational scalability checkpoint v0.8.2 is `0f99e10`.
 
@@ -18,5 +18,12 @@ concurrency did not increase useful throughput; the single streaming proxy event
 loop is the next measured bottleneck. These are one-Mac synthetic network results,
 not independent-machine or GPU scaling evidence.
 
+v0.8.4 separates streaming into a data-plane service using expiring route leases.
+In three matched trials per architecture/concurrency, separation reduced saturated
+routing tails and failure recovery but lowered useful throughput by 44–45%. At
+concurrency 1,000, median routing P95 changed from 3.916 s to 1.921 s and recovery
+from 2.958 s to 0.332 s; separated throughput was 577 req/s versus 1,048 req/s.
+
 Nothing is pushed or published. Raw evidence is retained under
-`results/v082_operational_scale/` and `results/v083_synthetic/`.
+`results/v082_operational_scale/`, `results/v083_synthetic/`, and
+`results/v084_separation/`. See `docs/v084-control-data-separation.md`.

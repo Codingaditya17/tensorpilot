@@ -19,6 +19,7 @@ import aiohttp
 from aiohttp import web
 
 from .control_plane import create_app
+from .data_plane import create_app as create_data_plane
 from .reporting import write_json
 from .scale_bench import percentile
 
@@ -153,7 +154,8 @@ async def wait_worker(session, control_url, worker_id, predicate, timeout):
 
 async def run_scenario(*, workers=16, requests=2000, concurrency=64, delay_ms=20,
                        jitter_ms=5, fault_workers=2, fault_after_s=.1,
-                       fault_duration_s=.3, heartbeat_timeout_s=.5, seed=42):
+                       fault_duration_s=.3, heartbeat_timeout_s=.5, seed=42,
+                       architecture="integrated"):
     if not 2 <= workers <= 64:
         raise ValueError("workers must be in 2..64")
     if not 1 <= requests <= 100_000 or not 1 <= concurrency <= min(requests, 2000):
@@ -161,6 +163,8 @@ async def run_scenario(*, workers=16, requests=2000, concurrency=64, delay_ms=20
     if (not 1 <= fault_workers < workers or delay_ms < 0 or not 0 <= jitter_ms <= delay_ms or
             not .05 <= heartbeat_timeout_s <= 5):
         raise ValueError("fault_workers and delay/jitter configuration are invalid")
+    if architecture not in ("integrated", "separated"):
+        raise ValueError("architecture must be integrated or separated")
 
     synthetic = [SyntheticWorker(f"worker-{index:04d}", seed + index,
                                  delay_ms / 1000, jitter_ms / 1000,
@@ -170,7 +174,9 @@ async def run_scenario(*, workers=16, requests=2000, concurrency=64, delay_ms=20
     worker_hosts = []
     urls = []
     control_runner = None
+    data_runner = None
     control_host = EventLoopThread("tensorpilot-synthetic-control")
+    data_host = EventLoopThread("tensorpilot-synthetic-data") if architecture == "separated" else None
     tracemalloc.start()
     started_at = time.perf_counter()
     try:
@@ -190,6 +196,13 @@ async def run_scenario(*, workers=16, requests=2000, concurrency=64, delay_ms=20
             return await start_app(control)
 
         control_runner, control_url = await control_host.submit(start_control())
+        if architecture == "separated":
+            async def start_data():
+                return await start_app(create_data_plane(control_url=control_url,
+                                                          max_connections=max(2048, concurrency * 2)))
+            data_runner, public_url = await data_host.submit(start_data())
+        else:
+            public_url = control_url
         timeout = aiohttp.ClientTimeout(total=5)
         connector = aiohttp.TCPConnector(limit=max(100, concurrency * 2))
         records = []
@@ -214,7 +227,7 @@ async def run_scenario(*, workers=16, requests=2000, concurrency=64, delay_ms=20
                     began = time.perf_counter()
                     record = {"index": index, "started_offset_s": began - started_at}
                     try:
-                        async with session.post(control_url + "/v1/generate",
+                        async with session.post(public_url + "/v1/generate",
                                                 json={"prompt": f"synthetic-{index}",
                                                       "max_tokens": 1, "timeout_s": 2}) as response:
                             record["http_status"] = response.status
@@ -292,6 +305,11 @@ async def run_scenario(*, workers=16, requests=2000, concurrency=64, delay_ms=20
                 final_health = await response.json()
             async with session.get(control_url + "/metrics") as response:
                 metrics_text = await response.text()
+            if architecture == "separated":
+                async with session.get(public_url + "/metrics") as response:
+                    data_metrics_text = await response.text()
+            else:
+                data_metrics_text = ""
 
         current_bytes, peak_bytes = tracemalloc.get_traced_memory()
         successes = [record for record in records if record["ok"]]
@@ -307,6 +325,7 @@ async def run_scenario(*, workers=16, requests=2000, concurrency=64, delay_ms=20
             "schema_version": 1, "benchmark": "synthetic-network-fault-cluster",
             "run_at_utc": datetime.now(timezone.utc).isoformat(),
             "configuration": {"workers": workers, "requests": requests,
+                              "architecture": architecture,
                               "concurrency": concurrency, "delay_ms": delay_ms,
                               "jitter_ms": jitter_ms, "fault_workers": fault_workers,
                               "fault_after_s": fault_after_s,
@@ -340,21 +359,28 @@ async def run_scenario(*, workers=16, requests=2000, concurrency=64, delay_ms=20
             "faults": fault_result, "final_health": final_health,
             "metrics_excerpt": [line for line in metrics_text.splitlines()
                                 if line.startswith("tensorpilot_cluster_")],
+            "data_plane_metrics_excerpt": [line for line in data_metrics_text.splitlines()
+                                            if line.startswith("tensorpilot_data_plane_")],
             "worker_assignments": dict(sorted(placements.items())),
             "requests": sorted(records, key=lambda item: item["index"]),
-            "limitations": ("All endpoints and the control plane share one Python event loop and one Mac. "
-                            "This validates real HTTP routing and failure semantics, not independent nodes or GPUs."),
+            "limitations": ("The control, data, client, and worker endpoints use independent event-loop threads "
+                            "when architecture=separated, but they remain in one Python process and one Mac. "
+                            "This validates real loopback HTTP routing and failure semantics, not independent nodes or GPUs."),
         }
     finally:
         tracemalloc.stop()
         if control_runner is not None:
             await control_host.submit(control_runner.cleanup())
+        if data_runner is not None:
+            await data_host.submit(data_runner.cleanup())
         for runner, host in zip(runners, worker_hosts):
             try:
                 await host.submit(runner.cleanup())
             except Exception:
                 pass
         control_host.stop()
+        if data_host is not None:
+            data_host.stop()
         for host in worker_hosts:
             host.stop()
 
@@ -371,7 +397,8 @@ def main():
     parser.add_argument("--fault-duration", type=float, default=.3)
     parser.add_argument("--heartbeat-timeout", type=float, default=.5)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--output", default="results/v083_synthetic_cluster.json")
+    parser.add_argument("--architecture", choices=("integrated", "separated"), default="integrated")
+    parser.add_argument("--output", default="results/v084_synthetic_cluster.json")
     args = parser.parse_args()
     path = Path(args.output)
     if path.exists():
@@ -384,7 +411,7 @@ def main():
                                          fault_after_s=args.fault_after,
                                          fault_duration_s=args.fault_duration,
                                          heartbeat_timeout_s=args.heartbeat_timeout,
-                                         seed=args.seed))
+                                         seed=args.seed, architecture=args.architecture))
     except (ValueError, TimeoutError) as exc:
         parser.error(str(exc))
     write_json(path, result)

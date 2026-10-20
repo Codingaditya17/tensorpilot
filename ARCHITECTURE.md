@@ -2,8 +2,10 @@
 
 ```mermaid
 flowchart LR
-    App[Application / load generator] --> Control[Optional cluster control plane]
-    Control --> HTTP[Versioned worker HTTP API]
+    App[Application / load generator] --> Data[Optional streaming data plane]
+    Data -->|short-lived route lease| Control[Cluster control plane]
+    Data --> HTTP[Versioned worker HTTP API]
+    Control --> HTTP
     App --> HTTP
     HTTP --> Validate[Validate and authenticate]
     Validate --> Admit[Bounded admission]
@@ -22,7 +24,13 @@ flowchart LR
 
 ## Cluster control plane
 
-`control_plane.py` proxies the worker NDJSON protocol without owning a model.
+`control_plane.py` owns cluster decisions without owning a model. Its integrated
+generation endpoint remains available for compatibility and v0.8.3 comparison.
+`data_plane.py` can instead obtain a short-lived route lease and proxy the worker
+NDJSON stream on a separate event loop. It owns downstream backpressure and
+cancellation, completes reservations in a shielded `finally` path and never
+forwards the control credential to workers. Expired leases prevent capacity from
+remaining reserved after a gateway crash.
 `routing.py` owns the worker registry, health state, drain state, reservations and
 bounded audit history. `cluster.py` starts one restart supervisor per worker, waits
 for readiness and then starts the control plane. Each worker still has a single

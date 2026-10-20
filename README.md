@@ -168,6 +168,8 @@ availability. `tensorpilot-matrix` emits preflighted v0.6 configurations, while
 
 See [architecture](ARCHITECTURE.md), [work log](WORK_LOG.md),
 [current session state](SESSION_STATE.md), and [roadmap](ROADMAP.md).
+The [v0.8.4 control/data-plane study](docs/v084-control-data-separation.md)
+records the measured reliability gains and throughput regression from separation.
 See [soak testing and recovery](docs/benchmarking.md) and
 [cache profiling](docs/memory-profiling.md) for deeper experiments.
 The [first scheduling study](docs/experiments/scheduler_2026-10-17.md) records

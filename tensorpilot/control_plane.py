@@ -22,6 +22,7 @@ SESSION = web.AppKey("session", aiohttp.ClientSession)
 PROBE_SESSION = web.AppKey("probe_session", aiohttp.ClientSession)
 LOCK = web.AppKey("lock", asyncio.Lock)
 CLUSTER_METRICS = web.AppKey("cluster_metrics", object)
+ROUTE_LEASES = web.AppKey("route_leases", dict)
 REQUEST_ID = web.RequestKey("request_id", str) if hasattr(web, "RequestKey") else "request_id"
 
 
@@ -34,6 +35,14 @@ class ClusterMetrics:
                                             "Lock wait and worker selection duration", **options)
         self.rejected = Counter("tensorpilot_cluster_rejections", "Requests rejected before worker dispatch", ["reason"], **options)
         self.outcomes = Counter("tensorpilot_cluster_proxy_outcomes", "Finished proxy streams", ["outcome"], **options)
+        self.active_proxy_streams = Gauge("tensorpilot_cluster_active_proxy_streams", "Streams proxied by this process", **options)
+        self.proxy_duration = Histogram("tensorpilot_cluster_proxy_duration_seconds", "Integrated proxy stream duration", **options)
+        self.proxy_chunks = Counter("tensorpilot_cluster_proxy_chunks_total", "Chunks proxied by the integrated endpoint", **options)
+        self.event_loop_lag = Gauge("tensorpilot_cluster_event_loop_lag_seconds", "Most recent control-plane event-loop scheduling lag", **options)
+        self.event_loop_lag_histogram = Histogram("tensorpilot_cluster_event_loop_lag_observations_seconds", "Control-plane event-loop scheduling lag", **options)
+        self.route_leases = Gauge("tensorpilot_cluster_route_leases", "Outstanding data-plane route leases", **options)
+        self.route_completions = Counter("tensorpilot_cluster_route_completions_total", "Route lease completions", ["outcome"], **options)
+        self.route_expirations = Counter("tensorpilot_cluster_route_lease_expirations_total", "Route leases released after expiry", **options)
         self.registered = Gauge("tensorpilot_cluster_registered_workers", "Registered workers", **options)
         self.ready = Gauge("tensorpilot_cluster_ready_workers", "Ready nonstale nondraining workers", **options)
         self.in_flight = Gauge("tensorpilot_cluster_in_flight_routes", "Currently routed requests", **options)
@@ -89,6 +98,7 @@ def create_app(*, workers=(), policy="capacity-aware", stale_after_s=5,
 
     app = web.Application(client_max_size=32 * 1024, middlewares=[operations])
     app[REGISTRY], app[LOCK], app[CLUSTER_METRICS] = registry, asyncio.Lock(), metrics
+    app[ROUTE_LEASES] = {}
 
     async def probe(worker_id):
         worker = registry.workers.get(worker_id)
@@ -149,6 +159,26 @@ def create_app(*, workers=(), policy="capacity-aware", stale_after_s=5,
             await sweep()
             await asyncio.sleep(probe_interval_s)
 
+    async def maintenance():
+        expected = time.perf_counter() + .05
+        while True:
+            await asyncio.sleep(max(0, expected - time.perf_counter()))
+            now = time.perf_counter()
+            lag = max(0, now - expected)
+            metrics.event_loop_lag.set(lag)
+            metrics.event_loop_lag_histogram.observe(lag)
+            expected = now + .05
+            expired = []
+            async with app[LOCK]:
+                for route_id, lease in tuple(app[ROUTE_LEASES].items()):
+                    if lease["expires_at"] <= now:
+                        expired.append(app[ROUTE_LEASES].pop(route_id))
+                for lease in expired:
+                    registry.release(lease["worker_id"])
+                metrics.route_leases.set(len(app[ROUTE_LEASES]))
+            if expired:
+                metrics.route_expirations.inc(len(expired))
+
     async def lifecycle(app):
         headers = {"Authorization": "Bearer " + worker_api_key} if worker_api_key else {}
         app[SESSION] = session_factory(headers=headers)
@@ -160,13 +190,15 @@ def create_app(*, workers=(), policy="capacity-aware", stale_after_s=5,
                      for index in range(heartbeat_concurrency)]
         await sweep()
         task = asyncio.create_task(poll(), name="tensorpilot-cluster-heartbeats")
+        maintenance_task = asyncio.create_task(maintenance(), name="tensorpilot-cluster-maintenance")
         try:
             yield
         finally:
             task.cancel()
+            maintenance_task.cancel()
             for consumer in consumers:
                 consumer.cancel()
-            await asyncio.gather(task, *consumers, return_exceptions=True)
+            await asyncio.gather(task, maintenance_task, *consumers, return_exceptions=True)
             await app[PROBE_SESSION].close()
             await app[SESSION].close()
 
@@ -251,29 +283,54 @@ def create_app(*, workers=(), policy="capacity-aware", stale_after_s=5,
     async def prometheus(request):
         return web.Response(body=metrics.render(registry), headers={"Content-Type": CONTENT_TYPE_LATEST})
 
+    async def create_route(request):
+        try:
+            body = await request.json()
+            prompt, count, timeout, model, artifact_sha256 = _validate_generate_body(body)
+        except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+            return _error(request, 400, "invalid_request", str(exc))
+        estimate = admission.estimate(prompt, count)
+        placement_started = time.perf_counter()
+        async with app[LOCK]:
+            placement = registry.select(estimate.kv_bytes, model=model, artifact_sha256=artifact_sha256,
+                                        request_id=request[REQUEST_ID])
+            if placement is not None:
+                route_id = uuid.uuid4().hex
+                expires_at = time.perf_counter() + timeout + 10
+                app[ROUTE_LEASES][route_id] = {"worker_id": placement.worker_id,
+                                                "expires_at": expires_at}
+                metrics.route_leases.set(len(app[ROUTE_LEASES]))
+        metrics.placement_duration.observe(time.perf_counter() - placement_started)
+        if placement is None:
+            metrics.rejected.labels(reason="no_capacity").inc()
+            return _error(request, 503, "no_worker_capacity", "No healthy compatible worker has capacity",
+                          {"Retry-After": "1"})
+        metrics.placements.labels(reason=placement.reason).inc()
+        return web.json_response({"route_id": route_id, "worker_id": placement.worker_id,
+                                  "worker_url": placement.url, "placement": placement.as_dict(),
+                                  "lease_timeout_s": timeout + 10}, status=201)
+
+    async def complete_route(request):
+        try:
+            body = await request.json()
+            if not isinstance(body, dict) or set(body) != {"outcome"} or not isinstance(body["outcome"], str):
+                raise ValueError("outcome string is required")
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            return _error(request, 400, "invalid_completion", str(exc))
+        async with app[LOCK]:
+            lease = app[ROUTE_LEASES].pop(request.match_info["route_id"], None)
+            if lease is not None:
+                registry.release(lease["worker_id"])
+                if body["outcome"] == "worker_transport_error" and lease["worker_id"] in registry.workers:
+                    registry.failure(lease["worker_id"], "DataPlaneTransportError")
+            metrics.route_leases.set(len(app[ROUTE_LEASES]))
+        metrics.route_completions.labels(outcome=body["outcome"] if lease else "duplicate_or_expired").inc()
+        return web.Response(status=204)
+
     async def generate(request):
         try:
             body = await request.json()
-            if not isinstance(body, dict) or set(body) - {"prompt", "max_tokens", "timeout_s", "model",
-                                                         "artifact_sha256"}:
-                raise ValueError("invalid or unsupported request fields")
-            prompt = body["prompt"]
-            count = body.get("max_tokens", 64)
-            timeout = body.get("timeout_s", 60)
-            model = body.get("model")
-            artifact_sha256 = body.get("artifact_sha256")
-            if not isinstance(prompt, str) or not prompt.strip() or len(prompt.encode()) > 16384:
-                raise ValueError("prompt must contain 1..16384 UTF-8 bytes")
-            if type(count) is not int or not 1 <= count <= 512:
-                raise ValueError("max_tokens must be an integer in 1..512")
-            if type(timeout) not in (int, float) or not math.isfinite(timeout) or not 0 < timeout <= 120:
-                raise ValueError("timeout_s must be in (0, 120]")
-            if model is not None and (not isinstance(model, str) or not model):
-                raise ValueError("model must be a nonempty string")
-            if artifact_sha256 is not None and (not isinstance(artifact_sha256, str) or
-                                                len(artifact_sha256) != 64 or
-                                                any(character not in "0123456789abcdef" for character in artifact_sha256)):
-                raise ValueError("artifact_sha256 must be a lowercase SHA-256 digest")
+            prompt, count, timeout, model, artifact_sha256 = _validate_generate_body(body)
         except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
             return _error(request, 400, "invalid_request", str(exc))
         estimate = admission.estimate(prompt, count)
@@ -290,6 +347,8 @@ def create_app(*, workers=(), policy="capacity-aware", stale_after_s=5,
         forwarded = {key: value for key, value in body.items()
                      if key not in ("model", "artifact_sha256")}
         outcome = "transport_error"
+        proxy_started = time.perf_counter()
+        metrics.active_proxy_streams.inc()
         downstream = None
         worker_request_id = None
         try:
@@ -321,6 +380,7 @@ def create_app(*, workers=(), policy="capacity-aware", stale_after_s=5,
                     except (ValueError, UnicodeDecodeError):
                         pass
                     await downstream.write(line)
+                    metrics.proxy_chunks.inc()
                 await downstream.write_eof()
                 outcome = "completed" if terminal else "incomplete_stream"
                 return downstream
@@ -344,6 +404,8 @@ def create_app(*, workers=(), policy="capacity-aware", stale_after_s=5,
             async with app[LOCK]:
                 registry.release(placement.worker_id)
             metrics.outcomes.labels(outcome=outcome).inc()
+            metrics.active_proxy_streams.dec()
+            metrics.proxy_duration.observe(time.perf_counter() - proxy_started)
 
     app.cleanup_ctx.append(lifecycle)
     app.router.add_get("/livez", livez)
@@ -355,9 +417,35 @@ def create_app(*, workers=(), policy="capacity-aware", stale_after_s=5,
     app.router.add_post("/v1/workers/{worker_id}/heartbeat", heartbeat)
     app.router.add_post("/v1/workers/{worker_id}/drain", drain)
     app.router.add_delete("/v1/workers/{worker_id}", remove)
+    app.router.add_post("/v1/routes", create_route)
+    app.router.add_post("/v1/routes/{route_id}/complete", complete_route)
     app.router.add_post("/v1/generate", generate)
     app.router.add_post("/generate", generate)
     return app
+
+
+def _validate_generate_body(body):
+    if not isinstance(body, dict) or set(body) - {"prompt", "max_tokens", "timeout_s", "model",
+                                                 "artifact_sha256"}:
+        raise ValueError("invalid or unsupported request fields")
+    prompt = body["prompt"]
+    count = body.get("max_tokens", 64)
+    timeout = body.get("timeout_s", 60)
+    model = body.get("model")
+    artifact_sha256 = body.get("artifact_sha256")
+    if not isinstance(prompt, str) or not prompt.strip() or len(prompt.encode()) > 16384:
+        raise ValueError("prompt must contain 1..16384 UTF-8 bytes")
+    if type(count) is not int or not 1 <= count <= 512:
+        raise ValueError("max_tokens must be an integer in 1..512")
+    if type(timeout) not in (int, float) or not math.isfinite(timeout) or not 0 < timeout <= 120:
+        raise ValueError("timeout_s must be in (0, 120]")
+    if model is not None and (not isinstance(model, str) or not model):
+        raise ValueError("model must be a nonempty string")
+    if artifact_sha256 is not None and (not isinstance(artifact_sha256, str) or
+                                        len(artifact_sha256) != 64 or
+                                        any(character not in "0123456789abcdef" for character in artifact_sha256)):
+        raise ValueError("artifact_sha256 must be a lowercase SHA-256 digest")
+    return prompt, count, timeout, model, artifact_sha256
 
 
 def _error(request, status, code, message, headers=None):
