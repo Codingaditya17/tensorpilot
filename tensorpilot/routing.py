@@ -1,6 +1,8 @@
 """Worker registry and deterministic cluster placement policies."""
 from dataclasses import asdict, dataclass, field
 from collections import defaultdict, deque
+import base64
+import json
 import math
 import re
 import time
@@ -87,6 +89,7 @@ class WorkerRegistry:
         self.compatible = defaultdict(list)
         self.compatibility_key = {}
         self.cursors = defaultdict(int)
+        self.membership_revision = 0
 
     @staticmethod
     def validate_identity(worker_id, url, allowed_hosts):
@@ -112,6 +115,7 @@ class WorkerRegistry:
             return existing
         worker = Worker(worker_id, url, now, now)
         self.workers[worker_id] = worker
+        self.membership_revision += 1
         self.lifecycle.append({"at_monotonic_s": now, "event": "worker_registered",
                                "worker_id": worker_id, "url": url})
         return worker
@@ -176,6 +180,7 @@ class WorkerRegistry:
         if worker.in_flight_routes:
             raise ValueError("worker has in-flight routed requests")
         removed = self.workers.pop(worker_id)
+        self.membership_revision += 1
         self.compatibility_key.pop(worker_id, None)
         self.lifecycle.append({"at_monotonic_s": self.clock(), "event": "worker_removed",
                                "worker_id": worker_id})
@@ -260,6 +265,69 @@ class WorkerRegistry:
                 "lifecycle_history": list(self.lifecycle),
                 "workers": [worker.snapshot(now, self.stale_after_s)
                             for worker in sorted(self.workers.values(), key=lambda item: item.worker_id)]}
+
+    def summary(self):
+        """Return bounded operational state without materializing worker records."""
+        now = self.clock()
+        counts = {"registered": len(self.workers), "ready": 0, "available": 0,
+                  "draining": 0, "stale": 0, "unready": 0, "in_flight_routes": 0}
+        uniform_model = uniform_artifact = None
+        model_seen = artifact_seen = False
+        mixed_model = mixed_artifact = False
+        for worker in self.workers.values():
+            stale = now - worker.last_seen > self.stale_after_s
+            counts["ready"] += worker.ready
+            counts["draining"] += worker.draining
+            counts["stale"] += stale
+            counts["unready"] += not worker.ready
+            counts["in_flight_routes"] += worker.in_flight_routes
+            counts["available"] += worker.ready and not worker.draining and not stale
+            if not model_seen:
+                uniform_model = worker.model
+                model_seen = True
+            elif worker.model != uniform_model:
+                mixed_model = True
+            if not artifact_seen:
+                uniform_artifact = worker.artifact_sha256
+                artifact_seen = True
+            elif worker.artifact_sha256 != uniform_artifact:
+                mixed_artifact = True
+        return {"policy": self.policy, "stale_after_s": self.stale_after_s,
+                "membership_revision": self.membership_revision,
+                "placements": self.placements, "worker_counts": counts,
+                "uniform_model": None if mixed_model else uniform_model,
+                "uniform_artifact_sha256": None if mixed_artifact else uniform_artifact,
+                "audit_counts": {"placements": len(self.history),
+                                 "lifecycle": len(self.lifecycle)}}
+
+    def page(self, *, limit=100, cursor=None):
+        if type(limit) is not int or not 1 <= limit <= 500:
+            raise ValueError("limit must be an integer in 1..500")
+        after = ""
+        revision = self.membership_revision
+        if cursor is not None:
+            try:
+                padding = "=" * (-len(cursor) % 4)
+                value = json.loads(base64.urlsafe_b64decode(cursor + padding))
+                if set(value) != {"revision", "after"} or type(value["revision"]) is not int or not isinstance(value["after"], str):
+                    raise ValueError
+                revision, after = value["revision"], value["after"]
+            except (ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError):
+                raise ValueError("cursor is invalid") from None
+            if revision != self.membership_revision:
+                raise RuntimeError("cursor membership revision is stale")
+        now = self.clock()
+        worker_ids = sorted(worker_id for worker_id in self.workers if worker_id > after)
+        selected = worker_ids[:limit]
+        next_cursor = None
+        if len(worker_ids) > limit:
+            payload = json.dumps({"revision": revision, "after": selected[-1]},
+                                 separators=(",", ":")).encode()
+            next_cursor = base64.urlsafe_b64encode(payload).decode().rstrip("=")
+        return {"membership_revision": revision, "workers": [
+                    self.workers[worker_id].snapshot(now, self.stale_after_s)
+                    for worker_id in selected],
+                "next_cursor": next_cursor, "limit": limit}
 
 
 def _nonnegative_int(value, name):

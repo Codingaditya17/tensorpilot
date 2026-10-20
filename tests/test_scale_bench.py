@@ -11,6 +11,8 @@ def test_scale_benchmark_accounts_for_all_placements_and_workers():
     assert measured["assignments_per_worker"]["max"] == 10
     assert measured["placements_per_s"] > 0
     assert measured["snapshot_bytes"] > 0
+    assert measured["health_summary"]["bytes"] < 1024
+    assert measured["worker_pagination"]["pages"] == 1
     assert not result["configuration"]["gpu_allocated"]
 
 

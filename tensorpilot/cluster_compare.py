@@ -14,6 +14,8 @@ MEASURES = ("completed_output_tokens_per_s", "p50_client_latency_s",
 def _artifact(report):
     server = report["metadata"]["server"]
     if server.get("service") == "tensorpilot-control-plane":
+        if server.get("uniform_artifact_sha256"):
+            return server["uniform_artifact_sha256"]
         artifacts = {worker.get("artifact_sha256") for worker in server.get("workers", [])}
         if None in artifacts or len(artifacts) != 1:
             raise ValueError("cluster comparison requires one pinned artifact across all workers")

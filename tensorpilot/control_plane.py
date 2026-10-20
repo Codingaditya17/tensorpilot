@@ -5,11 +5,13 @@ import hmac
 import json
 import math
 import os
+import time
 import uuid
 
 import aiohttp
 from aiohttp import web
-from prometheus_client import CollectorRegistry, Counter, Gauge, generate_latest, CONTENT_TYPE_LATEST
+from prometheus_client import (CollectorRegistry, Counter, Gauge, Histogram,
+                               generate_latest, CONTENT_TYPE_LATEST)
 
 from . import __version__
 from .admission import ResourceAdmission
@@ -17,6 +19,7 @@ from .routing import WorkerRegistry
 
 REGISTRY = web.AppKey("registry", WorkerRegistry)
 SESSION = web.AppKey("session", aiohttp.ClientSession)
+PROBE_SESSION = web.AppKey("probe_session", aiohttp.ClientSession)
 LOCK = web.AppKey("lock", asyncio.Lock)
 CLUSTER_METRICS = web.AppKey("cluster_metrics", object)
 REQUEST_ID = web.RequestKey("request_id", str) if hasattr(web, "RequestKey") else "request_id"
@@ -32,25 +35,40 @@ class ClusterMetrics:
         self.registered = Gauge("tensorpilot_cluster_registered_workers", "Registered workers", **options)
         self.ready = Gauge("tensorpilot_cluster_ready_workers", "Ready nonstale nondraining workers", **options)
         self.in_flight = Gauge("tensorpilot_cluster_in_flight_routes", "Currently routed requests", **options)
+        self.heartbeat_queue = Gauge("tensorpilot_cluster_heartbeat_queue", "Queued worker probes", **options)
+        self.heartbeat_duration = Histogram("tensorpilot_cluster_heartbeat_duration_seconds",
+                                            "Worker heartbeat request duration", **options)
+        self.heartbeat_outcomes = Counter("tensorpilot_cluster_heartbeat_total",
+                                          "Worker heartbeat outcomes", ["outcome"], **options)
+        self.worker_transitions = Counter("tensorpilot_cluster_worker_state_transitions_total",
+                                          "Observed ready-state transitions", ["previous", "current"], **options)
+        self.health_duration = Histogram("tensorpilot_cluster_health_endpoint_seconds",
+                                         "Control-plane health handler duration", **options)
+        self.heartbeat_sweep = Histogram("tensorpilot_cluster_heartbeat_sweep_seconds",
+                                         "Time to probe one complete worker snapshot", **options)
 
     def render(self, registry):
-        snapshot = registry.snapshot()
-        self.registered.set(len(snapshot["workers"]))
-        self.ready.set(sum(worker["ready"] and not worker["stale"] and not worker["draining"]
-                           for worker in snapshot["workers"]))
-        self.in_flight.set(sum(worker["in_flight_routes"] for worker in snapshot["workers"]))
+        summary = registry.summary()
+        self.registered.set(summary["worker_counts"]["registered"])
+        self.ready.set(summary["worker_counts"]["available"])
+        self.in_flight.set(summary["worker_counts"]["in_flight_routes"])
         return generate_latest(self.registry)
 
 
 def create_app(*, workers=(), policy="capacity-aware", stale_after_s=5,
                probe_interval_s=1, allowed_hosts=("127.0.0.1", "localhost", "::1"),
-               api_key=None, worker_api_key=None, session_factory=aiohttp.ClientSession):
+               api_key=None, worker_api_key=None, heartbeat_concurrency=16,
+               heartbeat_connect_timeout_s=.5, heartbeat_total_timeout_s=2,
+               session_factory=aiohttp.ClientSession):
+    if not 1 <= heartbeat_concurrency <= 1024:
+        raise ValueError("heartbeat_concurrency must be in 1..1024")
     registry = WorkerRegistry(stale_after_s=stale_after_s, policy=policy)
     metrics = ClusterMetrics()
     admission = ResourceAdmission()
 
     @web.middleware
     async def operations(request, handler):
+        started = time.perf_counter()
         request[REQUEST_ID] = uuid.uuid4().hex
         if api_key and request.path not in ("/livez", "/readyz"):
             supplied = request.headers.get("Authorization", "")
@@ -63,6 +81,8 @@ def create_app(*, workers=(), policy="capacity-aware", stale_after_s=5,
             response = _error(request, exc.status, code, exc.reason)
         if not response.prepared:
             response.headers.setdefault("X-Request-ID", request[REQUEST_ID])
+        if request.path == "/health":
+            metrics.health_duration.observe(time.perf_counter() - started)
         return response
 
     app = web.Application(client_max_size=32 * 1024, middlewares=[operations])
@@ -72,62 +92,107 @@ def create_app(*, workers=(), policy="capacity-aware", stale_after_s=5,
         worker = registry.workers.get(worker_id)
         if worker is None:
             return False
+        started = time.perf_counter()
+        previous_ready = worker.ready
         try:
-            async with app[SESSION].get(worker.url + "/health", timeout=aiohttp.ClientTimeout(total=2)) as response:
+            timeout = aiohttp.ClientTimeout(total=heartbeat_total_timeout_s,
+                                            connect=heartbeat_connect_timeout_s)
+            async with app[PROBE_SESSION].get(worker.url + "/health", timeout=timeout) as response:
                 if response.status != 200:
                     raise RuntimeError(f"health_http_{response.status}")
                 health = await response.json()
             async with app[LOCK]:
                 if worker_id in registry.workers:
                     registry.update(worker_id, health)
+                    current_ready = registry.workers[worker_id].ready
+                    if previous_ready != current_ready:
+                        metrics.worker_transitions.labels(previous=str(previous_ready).lower(),
+                                                          current=str(current_ready).lower()).inc()
+            metrics.heartbeat_outcomes.labels(outcome="success").inc()
             return True
         except (aiohttp.ClientError, TimeoutError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
             async with app[LOCK]:
                 if worker_id in registry.workers:
                     registry.failure(worker_id, type(exc).__name__)
+                    if previous_ready:
+                        metrics.worker_transitions.labels(previous="true", current="false").inc()
+            metrics.heartbeat_outcomes.labels(outcome="failure").inc()
             return False
+        finally:
+            metrics.heartbeat_duration.observe(time.perf_counter() - started)
+
+    queue = asyncio.Queue()
+
+    async def heartbeat_worker():
+        while True:
+            worker_id = await queue.get()
+            try:
+                await probe(worker_id)
+            finally:
+                queue.task_done()
+                metrics.heartbeat_queue.set(queue.qsize())
+
+    async def sweep():
+        started = time.perf_counter()
+        async with app[LOCK]:
+            worker_ids = list(registry.workers)
+        for worker_id in worker_ids:
+            await queue.put(worker_id)
+            metrics.heartbeat_queue.set(queue.qsize())
+        await queue.join()
+        metrics.heartbeat_sweep.observe(time.perf_counter() - started)
 
     async def poll():
         while True:
-            async with app[LOCK]:
-                worker_ids = list(registry.workers)
-            await asyncio.gather(*(probe(worker_id) for worker_id in worker_ids))
+            await sweep()
             await asyncio.sleep(probe_interval_s)
 
     async def lifecycle(app):
         headers = {"Authorization": "Bearer " + worker_api_key} if worker_api_key else {}
         app[SESSION] = session_factory(headers=headers)
+        app[PROBE_SESSION] = session_factory(headers=headers)
         for worker_id, url in workers:
             clean = registry.validate_identity(worker_id, url, set(allowed_hosts))
             registry.register(worker_id, clean)
-        await asyncio.gather(*(probe(worker_id) for worker_id in list(registry.workers)))
+        consumers = [asyncio.create_task(heartbeat_worker(), name=f"tensorpilot-heartbeat-{index}")
+                     for index in range(heartbeat_concurrency)]
+        await sweep()
         task = asyncio.create_task(poll(), name="tensorpilot-cluster-heartbeats")
         try:
             yield
         finally:
             task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+            for consumer in consumers:
+                consumer.cancel()
+            await asyncio.gather(task, *consumers, return_exceptions=True)
+            await app[PROBE_SESSION].close()
             await app[SESSION].close()
 
     async def livez(request):
         return web.json_response({"alive": True, "service": "tensorpilot-control-plane"})
 
     async def readyz(request):
-        snapshot = registry.snapshot()
-        ready = any(worker["ready"] and not worker["stale"] and not worker["draining"]
-                    for worker in snapshot["workers"])
+        summary = registry.summary()
+        ready = summary["worker_counts"]["available"] > 0
         return web.json_response({"ready": ready}, status=200 if ready else 503)
 
     async def health(request):
-        snapshot = registry.snapshot()
-        available = [worker for worker in snapshot["workers"]
-                     if worker["ready"] and not worker["stale"] and not worker["draining"]]
-        return web.json_response({"ready": bool(available), "service_version": __version__,
-                                  "service": "tensorpilot-control-plane",
-                                  "available_workers": len(available), **snapshot})
+        summary = registry.summary()
+        return web.json_response({"ready": summary["worker_counts"]["available"] > 0,
+                                  "service_version": __version__,
+                                  "service": "tensorpilot-control-plane", **summary})
 
     async def list_workers(request):
-        return web.json_response(registry.snapshot())
+        try:
+            raw_limit = request.query.get("limit", "100")
+            if not raw_limit.isdigit():
+                raise ValueError("limit must be an integer in 1..500")
+            return web.json_response(registry.page(limit=int(raw_limit),
+                                                   cursor=request.query.get("cursor")))
+        except ValueError as exc:
+            return _error(request, 400, "invalid_page", str(exc))
+        except RuntimeError as exc:
+            return _error(request, 409, "stale_cursor", str(exc))
 
     async def register(request):
         try:
@@ -312,8 +377,13 @@ def main():
     parser.add_argument("--policy", choices=WorkerRegistry.POLICIES, default="capacity-aware")
     parser.add_argument("--stale-after", type=float, default=5)
     parser.add_argument("--probe-interval", type=float, default=1)
+    parser.add_argument("--heartbeat-concurrency", type=int, default=16)
+    parser.add_argument("--heartbeat-connect-timeout", type=float, default=.5)
+    parser.add_argument("--heartbeat-total-timeout", type=float, default=2)
     args = parser.parse_args()
-    if not 1 <= args.port <= 65535 or args.stale_after <= 0 or args.probe_interval <= 0:
+    if (not 1 <= args.port <= 65535 or args.stale_after <= 0 or args.probe_interval <= 0 or
+            not 1 <= args.heartbeat_concurrency <= 1024 or
+            not 0 < args.heartbeat_connect_timeout <= args.heartbeat_total_timeout):
         parser.error("port must be valid and heartbeat intervals positive")
     api_key = os.environ.get("TENSORPILOT_CONTROL_API_KEY")
     if args.host not in ("127.0.0.1", "localhost", "::1") and not api_key:
@@ -321,6 +391,9 @@ def main():
     allowed = tuple(dict.fromkeys(("127.0.0.1", "localhost", "::1", *args.allow_worker_host)))
     app = create_app(workers=args.worker, policy=args.policy, stale_after_s=args.stale_after,
                      probe_interval_s=args.probe_interval, allowed_hosts=allowed, api_key=api_key,
+                     heartbeat_concurrency=args.heartbeat_concurrency,
+                     heartbeat_connect_timeout_s=args.heartbeat_connect_timeout,
+                     heartbeat_total_timeout_s=args.heartbeat_total_timeout,
                      worker_api_key=os.environ.get("TENSORPILOT_WORKER_API_KEY"))
     web.run_app(app, host=args.host, port=args.port, handler_cancellation=True, access_log=None)
 

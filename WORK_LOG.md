@@ -331,3 +331,25 @@ This result isolates synchronous registry cost. It does not include HTTP, global
 lock contention, network faults or GPU inference. The 1,000-worker snapshot was
 about 745 KB and required 36–40 ms, identifying full health serialization as the
 next scaling target. Evidence is under `results/v08_scale_baseline/`.
+
+## v0.8.2 operational scalability — 2026-10-20
+
+Replaced full-registry control-plane health responses with bounded aggregate state.
+The summary retains readiness, availability, drain/stale counts, in-flight routes,
+membership revision, policy and uniform artifact/model identity without embedding
+workers or audit records. Added deterministic worker pagination with limits of
+1..500. Opaque cursors carry the membership revision; registration or removal
+causes HTTP 409 so a client cannot continue an inconsistent scan.
+
+Replaced unbounded heartbeat task fan-out with a configurable fixed worker pool,
+queue and separate connect/total timeouts. Probe and inference traffic now use
+separate HTTP sessions. Added metrics for heartbeat queue depth, request duration,
+sweep duration, success/failure, ready-state transitions and health-handler latency.
+A slow-worker integration test confirmed eight endpoints never exceeded the
+configured concurrency of two.
+
+At 100/1,000/5,000 synthetic workers the summary payload stayed 260/264/264 bytes,
+versus legacy snapshots of 123 KB/745 KB/3.51 MB. Median summary generation took
+0.045/0.455/2.38 ms. Complete paginated scans required 1/2/10 pages and
+3.3/36.5/176.1 ms. These are in-process CPU measurements with no network or GPU.
+Evidence is under `results/v082_operational_scale/`.

@@ -59,8 +59,70 @@ def test_proxy_balances_concurrent_streams_and_explains_placement():
                            for _, done in results)
                 async with control.get("/health") as response:
                     body = await response.json()
-                    assert body["ready"] and body["available_workers"] == 2
+                    assert body["ready"] and body["worker_counts"]["available"] == 2
                     assert body["placements"] == 2
+                    assert "workers" not in body
+    asyncio.run(scenario())
+
+
+def test_worker_api_pages_and_rejects_cursor_after_membership_change():
+    async def scenario():
+        async with TestServer(worker_app("shared")) as worker:
+            url = str(worker.make_url("/"))
+            fleet = tuple((f"worker-{index:02d}", url) for index in range(5))
+            async with TestClient(TestServer(create_app(workers=fleet))) as control:
+                async with control.get("/v1/workers?limit=2") as response:
+                    assert response.status == 200
+                    first = await response.json()
+                assert [item["worker_id"] for item in first["workers"]] == ["worker-00", "worker-01"]
+                cursor = first["next_cursor"]
+                async with control.get("/v1/workers", params={"limit": 2, "cursor": cursor}) as response:
+                    second = await response.json()
+                assert [item["worker_id"] for item in second["workers"]] == ["worker-02", "worker-03"]
+                async with control.delete("/v1/workers/worker-04") as response:
+                    assert response.status == 204
+                async with control.get("/v1/workers", params={"limit": 2, "cursor": cursor}) as response:
+                    assert response.status == 409
+                    assert (await response.json())["error"]["code"] == "stale_cursor"
+    asyncio.run(scenario())
+
+
+def test_heartbeat_concurrency_is_bounded_for_slow_workers():
+    active = 0
+    maximum = 0
+
+    async def scenario():
+        nonlocal active, maximum
+        app = worker_app("shared")
+        health_route = next(route for route in app.router.routes()
+                            if route.resource.canonical == "/health" and route.method == "GET")
+        original = health_route.handler
+
+        async def slow_health(request):
+            nonlocal active, maximum
+            active += 1
+            maximum = max(maximum, active)
+            try:
+                await asyncio.sleep(.02)
+                return await original(request)
+            finally:
+                active -= 1
+
+        replacement = web.Application()
+        replacement.router.add_get("/health", slow_health)
+        replacement.router.add_post("/v1/generate", next(
+            route.handler for route in app.router.routes()
+            if route.resource.canonical == "/v1/generate" and route.method == "POST"))
+        async with TestServer(replacement) as worker:
+            url = str(worker.make_url("/"))
+            fleet = tuple((f"worker-{index}", url) for index in range(8))
+            control_app = create_app(workers=fleet, heartbeat_concurrency=2,
+                                     probe_interval_s=10)
+            async with TestClient(TestServer(control_app)) as control:
+                async with control.get("/metrics") as response:
+                    metrics = await response.text()
+                assert "tensorpilot_cluster_heartbeat_duration_seconds_count 8.0" in metrics
+        assert maximum == 2
     asyncio.run(scenario())
 
 

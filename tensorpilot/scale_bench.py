@@ -94,6 +94,25 @@ def run_benchmark(*, workers, placements, in_flight, policy="capacity-aware"):
     snapshot = registry.snapshot()
     snapshot_json = json.dumps(snapshot, separators=(",", ":"), allow_nan=False).encode()
     snapshot_s = time.perf_counter() - snapshot_start
+    summary_latencies = []
+    summary_json = None
+    for _ in range(100):
+        started = time.perf_counter()
+        summary_json = json.dumps(registry.summary(), separators=(",", ":"),
+                                  allow_nan=False).encode()
+        summary_latencies.append(time.perf_counter() - started)
+    page_started = time.perf_counter()
+    cursor = None
+    page_count = 0
+    page_bytes = 0
+    while True:
+        page = registry.page(limit=500, cursor=cursor)
+        page_bytes += len(json.dumps(page, separators=(",", ":"), allow_nan=False).encode())
+        page_count += 1
+        cursor = page["next_cursor"]
+        if cursor is None:
+            break
+    full_pagination_s = time.perf_counter() - page_started
     current_bytes, peak_bytes = tracemalloc.get_traced_memory()
     tracemalloc.stop()
 
@@ -122,6 +141,15 @@ def run_benchmark(*, workers, placements, in_flight, policy="capacity-aware"):
             },
             "snapshot_s": snapshot_s,
             "snapshot_bytes": len(snapshot_json),
+            "health_summary": {
+                "bytes": len(summary_json),
+                "p50_s": percentile(summary_latencies, .50),
+                "p95_s": percentile(summary_latencies, .95),
+                "p99_s": percentile(summary_latencies, .99),
+            },
+            "worker_pagination": {"page_limit": 500, "pages": page_count,
+                                  "total_bytes": page_bytes,
+                                  "full_iteration_s": full_pagination_s},
             "traced_current_bytes": current_bytes,
             "traced_peak_bytes": peak_bytes,
             "selected_workers": len(selected),

@@ -78,6 +78,31 @@ Each change is accepted only when the same M1 workload improves the limiting
 metric without violating fairness, compatibility, reservation accounting or
 failure semantics.
 
+#### v0.8.2 measured checkpoint
+
+The health response now contains only aggregate counts, membership revision,
+uniform model/artifact identity and bounded audit sizes. Worker details moved to a
+maximum-500-item paginated endpoint. Cursors contain a membership revision and
+return an explicit conflict after registration or removal, so clients restart the
+scan instead of silently skipping or duplicating workers.
+
+Heartbeat probes now pass through a configurable fixed-size queue with separate
+connect and total timeouts. Metrics record queue depth, duration, sweep duration,
+outcomes, ready-state transitions and health-handler latency. Probe traffic uses a
+separate HTTP session from inference proxy traffic.
+
+| Synthetic workers | Legacy snapshot | Summary payload | Summary P50 | Full paginated scan |
+|---:|---:|---:|---:|---:|
+| 100 | 123 KB | 260 B | 0.045 ms | 3.3 ms / 1 page |
+| 1,000 | 745 KB | 264 B | 0.455 ms | 36.5 ms / 2 pages |
+| 5,000 | 3.51 MB | 264 B | 2.38 ms | 176.1 ms / 10 pages |
+
+The payload is constant-size and 2,800× smaller than the old 1,000-worker response.
+The aggregation pass is still O(N), reaching 2.38 ms at 5,000 workers. Maintaining
+incremental state counters is a future optimization if HTTP measurements show this
+CPU cost becoming limiting. A complete worker inventory remains deliberately O(N)
+and explicit through pagination.
+
 ### M3: distributed correctness
 
 - Define worker leases with monotonically increasing epochs. Reject heartbeats and

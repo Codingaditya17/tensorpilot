@@ -128,3 +128,31 @@ def test_power_of_two_uses_compatible_index_and_preserves_filters():
     assert workers.select(1, model="wanted", artifact_sha256="sha-a") is None
     rejection = workers.snapshot()["placement_history"][-1]
     assert rejection["excluded"]["draining"] == 50
+
+
+def test_worker_pages_are_ordered_and_detect_membership_changes():
+    workers = WorkerRegistry(clock=lambda: 0)
+    for worker_id in ("c", "a", "b"):
+        workers.register(worker_id, f"http://127.0.0.1:{9000 + len(workers.workers)}")
+        workers.update(worker_id, health())
+    first = workers.page(limit=2)
+    assert [worker["worker_id"] for worker in first["workers"]] == ["a", "b"]
+    assert first["next_cursor"]
+    second = workers.page(limit=2, cursor=first["next_cursor"])
+    assert [worker["worker_id"] for worker in second["workers"]] == ["c"]
+    workers.register("d", "http://127.0.0.1:9004")
+    with pytest.raises(RuntimeError, match="stale"):
+        workers.page(limit=2, cursor=first["next_cursor"])
+    with pytest.raises(ValueError, match="cursor"):
+        workers.page(cursor="broken")
+
+
+def test_summary_is_bounded_and_excludes_worker_and_audit_records():
+    workers = registry()
+    summary = workers.summary()
+    assert summary["worker_counts"]["registered"] == 2
+    assert summary["worker_counts"]["available"] == 2
+    assert summary["uniform_model"] == "model-a"
+    assert summary["uniform_artifact_sha256"] == "sha-a"
+    assert "workers" not in summary
+    assert "placement_history" not in summary
