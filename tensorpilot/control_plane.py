@@ -29,7 +29,9 @@ class ClusterMetrics:
     def __init__(self):
         self.registry = CollectorRegistry()
         options = {"registry": self.registry}
-        self.placements = Counter("tensorpilot_cluster_placements", "Placement decisions", ["worker", "reason"], **options)
+        self.placements = Counter("tensorpilot_cluster_placements", "Placement decisions", ["reason"], **options)
+        self.placement_duration = Histogram("tensorpilot_cluster_placement_duration_seconds",
+                                            "Lock wait and worker selection duration", **options)
         self.rejected = Counter("tensorpilot_cluster_rejections", "Requests rejected before worker dispatch", ["reason"], **options)
         self.outcomes = Counter("tensorpilot_cluster_proxy_outcomes", "Finished proxy streams", ["outcome"], **options)
         self.registered = Gauge("tensorpilot_cluster_registered_workers", "Registered workers", **options)
@@ -275,14 +277,16 @@ def create_app(*, workers=(), policy="capacity-aware", stale_after_s=5,
         except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
             return _error(request, 400, "invalid_request", str(exc))
         estimate = admission.estimate(prompt, count)
+        placement_started = time.perf_counter()
         async with app[LOCK]:
             placement = registry.select(estimate.kv_bytes, model=model, artifact_sha256=artifact_sha256,
                                         request_id=request[REQUEST_ID])
+        metrics.placement_duration.observe(time.perf_counter() - placement_started)
         if placement is None:
             metrics.rejected.labels(reason="no_capacity").inc()
             return _error(request, 503, "no_worker_capacity", "No healthy compatible worker has capacity",
                           {"Retry-After": "1"})
-        metrics.placements.labels(worker=placement.worker_id, reason=placement.reason).inc()
+        metrics.placements.labels(reason=placement.reason).inc()
         forwarded = {key: value for key, value in body.items()
                      if key not in ("model", "artifact_sha256")}
         outcome = "transport_error"

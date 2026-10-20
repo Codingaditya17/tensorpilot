@@ -93,12 +93,12 @@ separate HTTP session from inference proxy traffic.
 
 | Synthetic workers | Legacy snapshot | Summary payload | Summary P50 | Full paginated scan |
 |---:|---:|---:|---:|---:|
-| 100 | 123 KB | 260 B | 0.045 ms | 3.3 ms / 1 page |
-| 1,000 | 745 KB | 264 B | 0.455 ms | 36.5 ms / 2 pages |
-| 5,000 | 3.51 MB | 264 B | 2.38 ms | 176.1 ms / 10 pages |
+| 100 | 123 KB | 387 B | 0.052 ms | 3.4 ms / 1 page |
+| 1,000 | 745 KB | 391 B | 0.490 ms | 33.7 ms / 2 pages |
+| 5,000 | 3.51 MB | 391 B | 2.69 ms | 171.1 ms / 10 pages |
 
-The payload is constant-size and 2,800× smaller than the old 1,000-worker response.
-The aggregation pass is still O(N), reaching 2.38 ms at 5,000 workers. Maintaining
+The payload is constant-size and about 1,900× smaller than the old 1,000-worker response.
+The aggregation pass is still O(N), reaching 2.69 ms at 5,000 workers. Maintaining
 incremental state counters is a future optimization if HTTP measurements show this
 CPU cost becoming limiting. A complete worker inventory remains deliberately O(N)
 and explicit through pagination.
@@ -114,6 +114,39 @@ and explicit through pagination.
   until tests prove which failure phases are safe.
 - Build a deterministic network-fault harness for latency, loss, disconnects and
   partitions. Validate drain and recovery state machines under process restarts.
+
+#### v0.8.3 measured checkpoint
+
+The synthetic harness uses real loopback TCP. The load driver, control plane and
+each worker own independent event loops, preventing one simulated worker's delay
+from blocking another worker. Workers expose the real health and NDJSON interfaces.
+The scenario applies seeded latency/jitter, hangs four health endpoints, marks the
+same workers offline, restores them with new instance IDs, registers a live churn
+worker, drains it, waits for zero routes and removes it.
+
+Three final repetitions used 32 workers, 10 ms execution, 3 ms jitter, a 500 ms
+heartbeat timeout and a 400 ms injected outage:
+
+| Concurrency | Requests/run | Successful req/s median | Error median | Routing P95 median | Routing P99 median | Recovery median |
+|---:|---:|---:|---:|---:|---:|---:|
+| 128 | 5,000 | 1,084 | 2.02% | 137 ms | 160 ms | 282 ms |
+| 512 | 10,000 | 1,019 | 1.50% | 2.30 s | 4.23 s | 8.75 s |
+| 1,000 | 10,000 | 982 | 3.57% | 3.75 s | 5.23 s | 6.04 s |
+
+Successful throughput peaked at the lowest tested concurrency. Increasing client
+concurrency reduced useful throughput and inflated tail routing latency before
+memory became a concern. Traced Python peak memory medians were about 13.8, 34.9
+and 55.6 MB. The first harness version also exposed two correctness issues that
+were fixed and retained in regression tests: worker occupancy and local routes
+were double-counted, and a churn worker could not be removed safely before drain.
+
+Heartbeat tuning showed a real tradeoff. At 512 concurrency, a 100 ms timeout
+caused 18.9% rejection and 8.25 s recovery; 500 ms reduced rejection to 1.88% in
+the matched tuning run and recovery to 0.83 s, while detection slowed from 0.30 s
+to 0.93 s. Final repeated runs still showed wide recovery variance under stream
+load. The current bottleneck is the single control-plane event loop proxying every
+stream: placement microbenchmarks remain fast, but HTTP routing queues dominate
+P95/P99 at 512+ concurrency.
 
 ### M4: MLOps deployment control
 

@@ -156,3 +156,13 @@ def test_summary_is_bounded_and_excludes_worker_and_audit_records():
     assert summary["uniform_artifact_sha256"] == "sha-a"
     assert "workers" not in summary
     assert "placement_history" not in summary
+
+
+def test_worker_heartbeat_and_local_routes_do_not_double_count_same_capacity():
+    workers = WorkerRegistry(clock=lambda: 0)
+    workers.register("a", "http://127.0.0.1:9000")
+    workers.update("a", health(active=1, queued=1, concurrency=2, queue_capacity=2))
+    workers.workers["a"].in_flight_routes = 2
+    assert workers.workers["a"].available_slots == 2
+    workers.workers["a"].in_flight_routes = 3
+    assert workers.workers["a"].available_slots == 1

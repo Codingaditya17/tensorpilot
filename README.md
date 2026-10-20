@@ -29,6 +29,8 @@ multiple independent sequences through that thread.
   preflight, throughput/latency gates and bounded Apple Metal kernel capture.
 - A local multi-worker control plane with health-aware placement, draining,
   artifact constraints, lifecycle audit history and supervised worker recovery.
+- Constant-size cluster health, revision-safe worker pagination, bounded heartbeat
+  concurrency and GPU-free real-network fault/saturation experiments.
 
 Real MLX inference and CPU behavior tests are separate evidence. A scheduling
 policy is experimental until measured against a baseline; improvements to one
@@ -87,6 +89,13 @@ cluster metrics. Workers can be drained through
 `POST /v1/workers/{worker_id}/drain`. See the
 [v0.7 control-plane design](docs/v07-cluster-control-plane.md) for the API,
 failure semantics, authentication boundaries and measured results.
+
+For bounded distributed-systems testing without loading MLX, run
+`tensorpilot-scale-bench` for 100–10,000 registry workers and
+`tensorpilot-synthetic-cluster` for independently scheduled loopback workers,
+network delay, heartbeat timeouts, worker replacement and membership churn. The
+[v0.8 plan and results](docs/v08-distributed-scale-plan.md) distinguish registry
+microbenchmarks from real HTTP tests and from unproven physical-node scaling.
 
 Resource admission defaults to a 512 MiB conservative KV estimate budget. Tune
 it with `--admission-memory-mib` and `--admission-bytes-per-token`. These are

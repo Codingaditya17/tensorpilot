@@ -1,22 +1,22 @@
 # Current engineering state
 
-TensorPilot v0.7.0 implements a local multi-worker GPU inference control plane on
-branch `codex/runtime-platform`. It adds health-aware registration, capacity-aware
-routing, drain and stale-worker exclusion, model/artifact placement constraints,
-bounded audit history, cluster metrics and a launcher that owns one restart
-supervisor per worker.
+TensorPilot v0.8.3 is implemented on `codex/v08-distributed-scale`. The immutable
+v0.7 baseline is commit `675d1fb`; the first thousand-worker routing checkpoint is
+`40d031a`, and operational scalability checkpoint v0.8.2 is `0f99e10`.
 
-Source validation passes 141 tests with Ruff clean before final package validation.
-Real MLX evidence includes balanced routing across two workers, complete drain to
-one worker, a worker replacement with a new instance ID and an in-flight SIGKILL.
-The interrupted stream received `worker_transport_error`, was not replayed and a
-new request succeeded through the remaining worker.
+The control plane now has indexed power-of-two placement, constant-size health,
+revision-safe worker pagination, bounded heartbeat concurrency/timeouts and
+fleet-safe metric cardinality. A GPU-free harness exercises real loopback HTTP with
+independently scheduled control plane, client and worker endpoints, including
+latency/jitter, heartbeat hangs, offline workers, new instances and safe
+register/drain/remove churn.
 
-Three matched repetitions completed 180/180 requests. Compared with direct
-single-process service, two worker processes sharing one Apple GPU measured +3.0%
-median throughput, while P95 latency worsened 34.0% and P95 inter-token latency
-worsened 76.7%. This is not evidence of independent-node scaling. See
-`docs/v07-cluster-control-plane.md` and `WORK_LOG.md`.
+Final validation passes 152 tests with Ruff clean. Three repeated 32-worker fault
+runs found median useful throughput of 1,084/1,019/982 requests/s at concurrency
+128/512/1,000. Median routing P95 rose from 137 ms to 2.30 s and 3.75 s. More
+concurrency did not increase useful throughput; the single streaming proxy event
+loop is the next measured bottleneck. These are one-Mac synthetic network results,
+not independent-machine or GPU scaling evidence.
 
-Nothing is pushed or published. Release artifacts are copied outside the repository
-only after exact-wheel validation.
+Nothing is pushed or published. Raw evidence is retained under
+`results/v082_operational_scale/` and `results/v083_synthetic/`.

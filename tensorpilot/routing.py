@@ -47,8 +47,14 @@ class Worker:
     @property
     def available_slots(self):
         total = self.execution_concurrency + self.queue_capacity
-        used = self.active_sequences + self.queue_depth + self.in_flight_routes
+        # Routed requests become the worker's active/queued requests. Heartbeats
+        # observe that same work later, so summing both would double-charge it.
+        used = max(self.active_sequences + self.queue_depth, self.in_flight_routes)
         return max(0, total - used)
+
+    @property
+    def accounted_load(self):
+        return max(self.active_sequences + self.queue_depth, self.in_flight_routes)
 
     @property
     def memory_pressure(self):
@@ -232,13 +238,13 @@ class WorkerRegistry:
         else:
             def score(worker):
                 capacity = worker.execution_concurrency + worker.queue_capacity
-                load = (worker.active_sequences + worker.queue_depth + worker.in_flight_routes) / capacity
+                load = worker.accounted_load / capacity
                 return load, worker.memory_pressure, worker.assigned_total, worker.worker_id
             worker = min(eligible, key=score)
             reason = ("power-of-two-load-then-memory" if self.policy == "power-of-two"
                       else "lowest-load-then-memory")
         capacity = worker.execution_concurrency + worker.queue_capacity
-        load = (worker.active_sequences + worker.queue_depth + worker.in_flight_routes) / capacity
+        load = worker.accounted_load / capacity
         worker.in_flight_routes += 1
         worker.assigned_total += 1
         self.placements += 1

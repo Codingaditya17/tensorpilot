@@ -348,8 +348,35 @@ sweep duration, success/failure, ready-state transitions and health-handler late
 A slow-worker integration test confirmed eight endpoints never exceeded the
 configured concurrency of two.
 
-At 100/1,000/5,000 synthetic workers the summary payload stayed 260/264/264 bytes,
-versus legacy snapshots of 123 KB/745 KB/3.51 MB. Median summary generation took
-0.045/0.455/2.38 ms. Complete paginated scans required 1/2/10 pages and
-3.3/36.5/176.1 ms. These are in-process CPU measurements with no network or GPU.
+At 100/1,000/5,000 synthetic workers the final summary payload stayed 387/391/391
+bytes, versus legacy snapshots of 123 KB/745 KB/3.51 MB. Median summary generation
+took 0.052/0.490/2.69 ms. Complete paginated scans required 1/2/10 pages and
+3.4/33.7/171.1 ms. These are in-process CPU measurements with no network or GPU.
 Evidence is under `results/v082_operational_scale/`.
+
+## v0.8.3 real-network synthetic fault cluster — 2026-10-20
+
+Added a bounded GPU-free harness with real loopback HTTP interfaces. The client,
+control plane and every synthetic worker run on independently scheduled event
+loops. Workers provide health and streaming generation endpoints with seeded
+latency/jitter. The scenario hangs and offlines workers, observes failure, restores
+new instance IDs, and registers/drains/removes a live churn worker during sustained
+traffic. It retains raw request records, Prometheus excerpts, assignment counts,
+event-loop lag, traced memory and transition timing.
+
+Early high-concurrency testing found that worker active/queue observations were
+being added to control-plane in-flight routes even though they represented the
+same work. Changed capacity accounting to the maximum of observed occupancy and
+local routes, preserving delayed-heartbeat conservatism without double charging.
+Testing also confirmed removal correctly rejects a worker with active routes; the
+harness now drains and waits for zero before deletion. Per-worker labels were
+removed from placement metrics to prevent fleet-sized Prometheus cardinality.
+
+Three repetitions at 32 workers measured median successful throughput of
+1,084/1,019/982 requests/s at concurrency 128/512/1,000. Median error rates were
+2.02%/1.50%/3.57%. Median routing P95 was 0.137/2.296/3.753 seconds and P99 was
+0.160/4.228/5.233 seconds. Median recovery was 0.282/8.751/6.036 seconds, with
+substantial run-to-run variation at high load. More concurrency reduced useful
+throughput and sharply worsened tails; the next bottleneck is the single streaming
+proxy event loop, not registry selection or memory. Evidence is under
+`results/v083_synthetic/`, including `summary.json` and all raw request reports.
