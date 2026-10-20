@@ -119,7 +119,8 @@ def create_app(*, control_url, api_key=None, control_api_key=None, max_connectio
         forwarded = {key: value for key, value in body.items() if key not in ("model", "artifact_sha256")}
         downstream = None
         worker_request_id = None
-        outcome = "worker_transport_error"
+        # A caller that disconnects or cancels is not evidence that the worker failed.
+        outcome = "client_disconnected"
         started = time.perf_counter()
         metrics.active.inc()
         try:
@@ -138,23 +139,30 @@ def create_app(*, control_url, api_key=None, control_api_key=None, max_connectio
                 if worker_request_id:
                     headers["X-Request-ID"] = worker_request_id
                 downstream = web.StreamResponse(headers=headers)
-                await downstream.prepare(request)
                 terminal = False
-                async for line in upstream.content:
-                    try:
-                        event = json.loads(line)
-                        if event.get("type") in ("done", "error"):
-                            event["placement"] = placement
-                            line = (json.dumps(event) + "\n").encode()
-                            terminal = True
-                    except (ValueError, UnicodeDecodeError):
-                        pass
-                    await downstream.write(line)
-                    metrics.chunks.inc()
-                await downstream.write_eof()
+                try:
+                    await downstream.prepare(request)
+                    async for line in upstream.content:
+                        try:
+                            event = json.loads(line)
+                            if event.get("type") in ("done", "error"):
+                                event["placement"] = placement
+                                line = (json.dumps(event) + "\n").encode()
+                                terminal = True
+                        except (ValueError, UnicodeDecodeError):
+                            pass
+                        await downstream.write(line)
+                        metrics.chunks.inc()
+                    await downstream.write_eof()
+                except ConnectionError:
+                    # Only the caller's socket raises builtin ConnectionError here. Closing
+                    # upstream lets the worker cancel decode; the worker is not penalized.
+                    downstream.force_close()
+                    return downstream
                 outcome = "completed" if terminal else "incomplete_stream"
                 return downstream
-        except (aiohttp.ClientError, TimeoutError, ConnectionError):
+        except (aiohttp.ClientError, TimeoutError):
+            outcome = "worker_transport_error"
             if downstream is not None and downstream.prepared:
                 event = {"type": "error", "code": "worker_transport_error",
                          "error": "Selected worker connection failed", "request_id": worker_request_id,

@@ -14,7 +14,7 @@ def source_fingerprint():
 
 def dependency_versions():
     result = {}
-    for name in ("mlx", "mlx-lm", "aiohttp", "prometheus-client", "huggingface-hub", "transformers", "tokenizers"):
+    for name in ("mlx", "mlx-lm", "aiohttp", "prometheus-client", "huggingface-hub", "transformers", "tokenizers", "torch"):
         try:
             result[name] = version(name)
         except PackageNotFoundError:

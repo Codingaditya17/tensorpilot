@@ -1,0 +1,96 @@
+{
+  "schema": "tensorpilot.gpu-experiments/v1",
+  "suite": "v0.9-single-gpu",
+  "target": {
+    "model": "Qwen/Qwen2.5-0.5B-Instruct",
+    "revision": "7ae557604adf67be50417f59c2c2f167def9a775",
+    "license": "Apache-2.0",
+    "prompt_format": "raw text, tokenizer default special tokens (no chat template)"
+  },
+  "assumptions": {
+    "decode_tokens_per_s": 60,
+    "prefill_tokens_per_s": 2000,
+    "note": "Placeholders for planning only. Replace with the preflight measurement before budgeting a rental."
+  },
+  "session_overhead_minutes": 45,
+  "experiments": [
+    {
+      "id": "single-sequential-baseline",
+      "kind": "closed_loop",
+      "description": "One client, one worker, one sequence at a time: the uncontended latency floor.",
+      "requests": 40, "concurrency": 1, "prompt_repeats": 4, "max_tokens": 128,
+      "repeats": 3, "warmup_requests": 5, "timeout_s": 60
+    },
+    {
+      "id": "concurrency-queueing-c4",
+      "kind": "closed_loop",
+      "description": "Four clients against a serial worker: measures queueing delay, not batched throughput.",
+      "requests": 40, "concurrency": 4, "prompt_repeats": 4, "max_tokens": 128,
+      "repeats": 3, "warmup_requests": 5, "timeout_s": 60
+    },
+    {
+      "id": "concurrency-queueing-c8",
+      "kind": "closed_loop",
+      "description": "Eight clients, which equals the default queue capacity; the upper bound before rejections.",
+      "requests": 40, "concurrency": 8, "prompt_repeats": 4, "max_tokens": 128,
+      "repeats": 3, "warmup_requests": 5, "timeout_s": 60
+    },
+    {
+      "id": "length-short-prompt-short-output",
+      "kind": "length_matrix",
+      "description": "Short context and short output.",
+      "requests": 40, "concurrency": 1, "prompt_repeats": 2, "max_tokens": 32,
+      "repeats": 2, "warmup_requests": 3, "timeout_s": 60
+    },
+    {
+      "id": "length-medium-prompt-medium-output",
+      "kind": "length_matrix",
+      "description": "Medium context and medium output.",
+      "requests": 30, "concurrency": 1, "prompt_repeats": 8, "max_tokens": 128,
+      "repeats": 2, "warmup_requests": 3, "timeout_s": 90
+    },
+    {
+      "id": "length-long-prompt-long-output",
+      "kind": "length_matrix",
+      "description": "Long context (about 550 prompt tokens) and long output (256 tokens).",
+      "requests": 20, "concurrency": 1, "prompt_repeats": 32, "max_tokens": 256,
+      "repeats": 2, "warmup_requests": 2, "timeout_s": 120
+    },
+    {
+      "id": "arrival-rate-ladder",
+      "kind": "open_loop",
+      "description": "Paced arrivals at increasing rates; inspect dispatch lag to see when offered load exceeds service.",
+      "requests": 60, "concurrency": 32, "prompt_repeats": 4, "max_tokens": 128,
+      "rates": [0.5, 1.0, 2.0, 4.0],
+      "repeats": 2, "warmup_requests": 5, "timeout_s": 60
+    },
+    {
+      "id": "saturation-backpressure",
+      "kind": "saturation",
+      "description": "Arrivals above service capacity; expect bounded 503 overloaded responses, not unbounded queueing.",
+      "requests": 120, "concurrency": 64, "prompt_repeats": 4, "max_tokens": 128,
+      "rates": [8.0, 16.0],
+      "repeats": 1, "warmup_requests": 0, "timeout_s": 60
+    },
+    {
+      "id": "recovery-supervised-kill",
+      "kind": "recovery_manual",
+      "status": "planned",
+      "reason": "Requires a human to terminate the worker process; procedure is in docs/v09-runpod-runbook.md.",
+      "estimated_minutes": 15,
+      "steps": [
+        "Start the worker under tensorpilot.supervisor with --max-restarts 3.",
+        "Run a closed-loop load at concurrency 2 for 60 seconds.",
+        "Send SIGKILL to the worker PID while a stream is active; record the terminal event the client sees.",
+        "Wait for readiness; confirm the supervisor lifecycle log shows worker_restart_scheduled then worker_ready.",
+        "Repeat one closed-loop run and confirm recovery without replayed tokens."
+      ]
+    },
+    {
+      "id": "batch-width-planned",
+      "kind": "batch_width_planned",
+      "status": "planned",
+      "reason": "Continuous batching is implemented only for MLX in v0.9; a CUDA batch adapter is required first."
+    }
+  ]
+}

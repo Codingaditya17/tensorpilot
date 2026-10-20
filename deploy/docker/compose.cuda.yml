@@ -1,0 +1,26 @@
+# Single-GPU worker on a Linux NVIDIA host. Requires the NVIDIA Container Toolkit.
+#   TENSORPILOT_API_KEY=... docker compose -f deploy/docker/compose.cuda.yml up --build
+services:
+  worker:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.cuda
+    image: tensorpilot-cuda:0.9.0
+    init: true
+    stop_grace_period: 60s
+    restart: "no"
+    environment:
+      TENSORPILOT_API_KEY: ${TENSORPILOT_API_KEY:?set TENSORPILOT_API_KEY before starting}
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - hf-cache:/data/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+volumes:
+  hf-cache: {}

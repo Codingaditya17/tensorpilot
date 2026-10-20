@@ -1,8 +1,17 @@
-"""MLX access stays on the engine's single dedicated thread."""
+"""Backend serving contract plus the MLX implementation.
+
+Model access stays on the engine's single dedicated thread. Every backend, MLX or
+CUDA, must satisfy ``InferenceBackend``: the serial ``Engine`` relies only on the
+members listed there, so a new runtime plugs in without changing scheduling,
+admission, cancellation or the HTTP streaming contract.
+"""
 from dataclasses import dataclass
 from contextlib import closing
+from typing import Iterator, Protocol
 
 from .artifacts import resolve_model
+
+BACKENDS = ("mlx", "cuda")
 
 
 @dataclass
@@ -13,6 +22,20 @@ class Token:
     prompt_tokens: int | None = None
     finish_reason: str | None = None
     memory_profile: dict | None = None
+
+
+class InferenceBackend(Protocol):
+    """Members the serving engine uses; all calls run on the model-owner thread."""
+
+    backend_name: str
+    provenance: dict
+    max_prompt_tokens: int
+
+    def stream(self, prompt: str, max_tokens: int) -> Iterator[Token]:
+        """Yield one Token per generated token; closing the iterator must release it."""
+
+    def memory(self) -> dict:
+        """Return a memory sample. Keys a runtime does not measure are reported as None."""
 
 
 def cache_profile(cache, mx):
@@ -26,14 +49,17 @@ def cache_profile(cache, mx):
 
 
 class MLXBackend:
+    backend_name = "mlx"
+
     def __init__(self, model_name, memory_bytes, max_prompt_tokens, *, revision=None, offline=False,
-                 profile_memory=False):
+                 profile_memory=False, cache_dir=None):
         import mlx.core as mx
         from mlx_lm import load
         self.mx = mx
         mx.set_memory_limit(memory_bytes)
         mx.set_cache_limit(min(memory_bytes // 8, 512 * 1024**2))
-        path, self.provenance = resolve_model(model_name, revision=revision, offline=offline)
+        path, self.provenance = resolve_model(model_name, revision=revision, offline=offline,
+                                              cache_dir=cache_dir)
         self.provenance["mlx_device"] = mx.device_info()
         self.provenance["memory_profiling"] = profile_memory
         self.profile_memory = profile_memory

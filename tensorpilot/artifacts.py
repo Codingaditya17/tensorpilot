@@ -22,7 +22,7 @@ def artifact_fingerprint(directory):
     return hashlib.sha256(manifest).hexdigest()
 
 
-def resolve_model(model, *, revision=None, offline=False):
+def resolve_model(model, *, revision=None, offline=False, cache_dir=None):
     path = Path(model).expanduser()
     local = path.exists()
     if local:
@@ -32,7 +32,7 @@ def resolve_model(model, *, revision=None, offline=False):
             raise ValueError("revision is only supported for a Hugging Face repository")
     else:
         from huggingface_hub import snapshot_download
-        path = Path(snapshot_download(repo_id=model, revision=revision,
+        path = Path(snapshot_download(repo_id=model, revision=revision, cache_dir=cache_dir,
                                       local_files_only=offline, allow_patterns=MODEL_PATTERNS))
     resolved_revision = path.name if not local and re.fullmatch(r"[0-9a-f]{40}", path.name) else None
     return path, {"model_source": "local_directory" if local else "huggingface",

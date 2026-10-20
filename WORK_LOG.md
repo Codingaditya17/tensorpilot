@@ -394,3 +394,39 @@ substantial run-to-run variation at high load. More concurrency reduced useful
 throughput and sharply worsened tails; the next bottleneck is the single streaming
 proxy event loop, not registry selection or memory. Evidence is under
 `results/v083_synthetic/`, including `summary.json` and all raw request reports.
+
+## v0.9 — local CUDA worker preparation — 2026-10-20
+
+Implemented the Linux/NVIDIA worker locally, without renting or starting paid
+infrastructure. No GPU has executed this code. Performance is not claimed.
+
+- Added `InferenceBackend` as the documented serving contract. `MLXBackend` and the
+  new `CUDABackend` both satisfy it. The engine, admission, cancellation, deadlines
+  and HTTP streaming are unchanged. Batch execution stays MLX-only.
+- `CUDABackend`: Transformers and PyTorch CUDA, greedy decoding with an explicit KV
+  cache so each token passes the engine's cancellation checkpoints. EOS is never
+  counted as output. Incremental detokenization holds back incomplete UTF-8. A
+  per-process allocator cap and bounded OOM handling keep failures per request.
+- Telemetry: background `nvidia-smi` sampler with `measured`, `unavailable` and
+  `error` states. Unsupported fields are null, never zero.
+- Found and fixed a data-plane defect: a client disconnect mid-stream was recorded as
+  a worker transport failure, leaving a healthy worker unplaceable until the next
+  heartbeat. The regression fails on the v0.8.4 code and passes on v0.9. The
+  integrated proxy received the same classification hardening; no test reproduced it.
+- Found and fixed a packaging gap: the sdist omitted the shared test fixture.
+- Deployment: env-configurable server, locked CUDA requirements (`uv`, torch 2.9.1 with
+  CUDA 12.8 wheels), non-root Dockerfile with readiness healthcheck, compose file,
+  Runpod session script with `--plan` mode, diagnostics script and an env template.
+- Benchmarks: validated config, planning with declared assumptions, runner that
+  records server provenance per report, and planned-only experiments that refuse to
+  run. The single-GPU suite plans 114 minutes against a 300-minute session.
+- Validation: 202 tests passed (154 existing, 48 new). Ruff clean. A real pinned
+  checkpoint (`Qwen2.5-0.5B-Instruct@7ae55760`) matched transformers greedy output
+  token for token on CPU. SIGTERM during decode exits cleanly. The wheel and sdist
+  build, and the sdist tests pass against the installed wheel.
+- Not verified: the Dockerfile build (the Docker daemon started, but registry access
+  hung), the CI CPU job on GitHub, and every CUDA-dependent behavior. See
+  `docs/v09-validation-report.md`.
+- The MLX Apple path was not re-run on a model. The change to it is the shared proxy
+  fix, a `cache_dir` argument, and environment defaults. The existing MLX-independent
+  tests pass unchanged.

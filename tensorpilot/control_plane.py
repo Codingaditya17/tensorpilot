@@ -346,7 +346,8 @@ def create_app(*, workers=(), policy="capacity-aware", stale_after_s=5,
         metrics.placements.labels(reason=placement.reason).inc()
         forwarded = {key: value for key, value in body.items()
                      if key not in ("model", "artifact_sha256")}
-        outcome = "transport_error"
+        # A caller that disconnects is not evidence that the selected worker failed.
+        outcome = "client_disconnected"
         proxy_started = time.perf_counter()
         metrics.active_proxy_streams.inc()
         downstream = None
@@ -368,23 +369,29 @@ def create_app(*, workers=(), policy="capacity-aware", stale_after_s=5,
                     headers["X-Request-ID"] = upstream.headers["X-Request-ID"]
                 worker_request_id = upstream.headers.get("X-Request-ID")
                 downstream = web.StreamResponse(headers=headers)
-                await downstream.prepare(request)
                 terminal = False
-                async for line in upstream.content:
-                    try:
-                        event = json.loads(line)
-                        if event.get("type") in ("done", "error"):
-                            event["placement"] = placement.as_dict()
-                            line = (json.dumps(event) + "\n").encode()
-                            terminal = True
-                    except (ValueError, UnicodeDecodeError):
-                        pass
-                    await downstream.write(line)
-                    metrics.proxy_chunks.inc()
-                await downstream.write_eof()
+                try:
+                    await downstream.prepare(request)
+                    async for line in upstream.content:
+                        try:
+                            event = json.loads(line)
+                            if event.get("type") in ("done", "error"):
+                                event["placement"] = placement.as_dict()
+                                line = (json.dumps(event) + "\n").encode()
+                                terminal = True
+                        except (ValueError, UnicodeDecodeError):
+                            pass
+                        await downstream.write(line)
+                        metrics.proxy_chunks.inc()
+                    await downstream.write_eof()
+                except ConnectionError:
+                    # Only the caller's socket raises builtin ConnectionError here.
+                    downstream.force_close()
+                    return downstream
                 outcome = "completed" if terminal else "incomplete_stream"
                 return downstream
-        except (aiohttp.ClientError, TimeoutError, ConnectionError) as exc:
+        except (aiohttp.ClientError, TimeoutError) as exc:
+            outcome = "transport_error"
             async with app[LOCK]:
                 if placement.worker_id in registry.workers:
                     registry.failure(placement.worker_id, type(exc).__name__)

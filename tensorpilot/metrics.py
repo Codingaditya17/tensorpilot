@@ -27,6 +27,10 @@ class Metrics:
         self.mlx_active = Gauge("tensorpilot_mlx_active_bytes", "Last sampled MLX active allocation, not process RSS", **options)
         self.mlx_peak = Gauge("tensorpilot_mlx_peak_bytes_process", "MLX process-lifetime allocation peak", **options)
         self.memory_age = Gauge("tensorpilot_memory_sample_age_seconds", "Age of cached backend memory sample", **options)
+        self.cuda_allocated = Gauge("tensorpilot_cuda_allocated_bytes", "Last sampled CUDA allocated tensor bytes", **options)
+        self.cuda_reserved = Gauge("tensorpilot_cuda_reserved_bytes", "Last sampled CUDA caching-allocator reserved bytes", **options)
+        self.cuda_peak_reserved = Gauge("tensorpilot_cuda_peak_reserved_bytes", "CUDA process-lifetime peak reserved bytes", **options)
+        self.cuda_oom = Gauge("tensorpilot_cuda_oom_events", "Process-lifetime count of CUDA out-of-memory errors", **options)
         self.scheduled = Counter("tensorpilot_scheduled_requests", "Jobs dispatched by scheduling decision",
                                  ["reason"], **options)
         self.batch_steps = Counter("tensorpilot_batch_steps", "Shared batch prefill/decode steps", **options)
@@ -56,5 +60,13 @@ class Metrics:
         return generate_latest(self.registry)
 
     def update_memory(self, sample):
-        self.mlx_active.set(sample["mlx_active_bytes"])
-        self.mlx_peak.set(sample["mlx_peak_bytes_process"])
+        # Each runtime reports only what it measures; absent or None values are not zero.
+        if sample.get("mlx_active_bytes") is not None:
+            self.mlx_active.set(sample["mlx_active_bytes"])
+        if sample.get("mlx_peak_bytes_process") is not None:
+            self.mlx_peak.set(sample["mlx_peak_bytes_process"])
+        if sample.get("cuda_allocated_bytes") is not None:
+            self.cuda_allocated.set(sample["cuda_allocated_bytes"])
+            self.cuda_reserved.set(sample["cuda_reserved_bytes"])
+            self.cuda_peak_reserved.set(sample["cuda_peak_reserved_bytes"])
+            self.cuda_oom.set(sample["cuda_oom_events"])

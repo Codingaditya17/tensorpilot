@@ -53,6 +53,26 @@ For CPU-only development/CI, install `requirements-service.txt` instead. It does
 not install MLX or download a model. Inference requires macOS/Metal; a Linux
 container is not a substitute for the local GPU backend.
 
+## Linux/NVIDIA CUDA worker (v0.9, unmeasured on GPU)
+
+v0.9 adds an optional CUDA worker: PyTorch and Hugging Face Transformers, greedy
+decoding with an explicit KV cache, the same streaming API, and the same control and
+data planes. It is prepared and tested locally on CPU, and it has not run on an NVIDIA
+GPU yet. No CUDA performance is claimed.
+
+```bash
+uv pip install -r requirements-cuda.txt            # Linux x86_64 lock (Python 3.11)
+TENSORPILOT_API_KEY=... python -m tensorpilot.server --backend cuda \
+  --model Qwen/Qwen2.5-0.5B-Instruct --revision 7ae557604adf67be50417f59c2c2f167def9a775
+python -m tensorpilot.gpu_preflight --model Qwen/Qwen2.5-0.5B-Instruct \
+  --revision 7ae557604adf67be50417f59c2c2f167def9a775 --output results/v09_gpu/preflight.json
+```
+
+The [architecture and decisions](docs/v09-cuda-runtime.md), the
+[Runpod session runbook](docs/v09-runpod-runbook.md) and the
+[local validation report](docs/v09-validation-report.md) describe what is verified
+and what requires a GPU.
+
 ## Serve and call
 
 ```bash
@@ -179,8 +199,8 @@ The historical sequential benchmark is preserved as `tensorpilot.bench`;
 
 ## Current boundaries
 
-This release includes a multi-process control plane, but all measured workers run
-on one Mac and share one Apple GPU. It does not implement distributed tensor or
+This release includes a multi-process control plane. All measured MLX workers run
+on one Mac and share one Apple GPU. The CUDA worker is unmeasured on GPU hardware. It does not implement distributed tensor or
 pipeline execution, per-tenant isolation, a durable request queue or transparent
 in-flight replay. Supervisors restart failed worker processes after downtime.
 Allocator limits and context caps do not measure all macOS memory pressure, and a

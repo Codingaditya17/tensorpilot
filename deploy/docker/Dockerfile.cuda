@@ -1,0 +1,48 @@
+# TensorPilot CUDA worker. Built for NVIDIA Linux hosts and Runpod GPU Pods.
+#
+# Host requirements: an NVIDIA driver that supports CUDA 12.8 (driver branch 570 or newer
+# for full support; the NVIDIA container runtime injects the driver libraries).
+# The CUDA runtime is supplied by the PyTorch wheels pinned in requirements-cuda.txt, so
+# the image needs no CUDA toolkit. See docs/v09-cuda-runtime.md for the full assumptions.
+FROM python:3.11-slim-bookworm
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    TENSORPILOT_BACKEND=cuda \
+    TENSORPILOT_MODEL=Qwen/Qwen2.5-0.5B-Instruct \
+    TENSORPILOT_REVISION=7ae557604adf67be50417f59c2c2f167def9a775 \
+    TENSORPILOT_HOST=0.0.0.0 \
+    TENSORPILOT_PORT=8080 \
+    TENSORPILOT_CACHE_DIR=/data/huggingface \
+    HF_HOME=/data/huggingface
+
+RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin tensorpilot \
+ && mkdir -p /data/huggingface \
+ && chown -R tensorpilot:tensorpilot /data
+
+WORKDIR /app
+COPY requirements-cuda.txt ./
+RUN python -m pip install -r requirements-cuda.txt
+
+COPY pyproject.toml README.md ./
+COPY tensorpilot ./tensorpilot
+RUN python -m pip install --no-deps . \
+ && python -c "import tensorpilot.cuda_backend"
+
+USER 10001:10001
+VOLUME ["/data/huggingface"]
+EXPOSE 8080
+
+# Readiness, not liveness: the worker is ready only after the model is loaded and warmed.
+HEALTHCHECK --interval=15s --timeout=5s --start-period=300s --retries=4 \
+  CMD python -c "import os, sys, urllib.request; url = 'http://127.0.0.1:%s/readyz' % os.environ.get('TENSORPILOT_PORT', '8080'); sys.exit(0 if urllib.request.urlopen(url, timeout=3).status == 200 else 1)"
+
+# Run in the foreground as PID 1. The server handles SIGTERM as graceful shutdown: it cancels
+# active decode, drains the queue and releases the model. Use `docker run --init` or compose
+# `init: true` if you need zombie reaping for child processes.
+ENTRYPOINT ["tensorpilot-server"]
+STOPSIGNAL SIGTERM

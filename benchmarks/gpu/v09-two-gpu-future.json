@@ -1,0 +1,22 @@
+{
+  "schema": "tensorpilot.gpu-experiments/v1",
+  "suite": "v0.9-two-gpu-future",
+  "target": {
+    "model": "Qwen/Qwen2.5-0.5B-Instruct",
+    "revision": "7ae557604adf67be50417f59c2c2f167def9a775"
+  },
+  "assumptions": {
+    "decode_tokens_per_s": 60,
+    "prefill_tokens_per_s": 2000,
+    "note": "Planning only. No multi-GPU claim is made by this suite."
+  },
+  "experiments": [
+    {
+      "id": "two-gpu-independent-workers",
+      "kind": "two_gpu_planned",
+      "status": "planned",
+      "minimum_gpus": 2,
+      "reason": "Requires two GPUs. Placement across workers is tested locally; scaling is not measured until two GPUs exist."
+    }
+  ]
+}

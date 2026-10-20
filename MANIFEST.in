@@ -1,0 +1,6 @@
+# Source distributions carry the test suite, shared test fixtures, benchmark configs and
+# deployment files so the tests can run from the sdist. Wheels contain only the package.
+include requirements.txt requirements-service.txt requirements-cuda.in requirements-cuda.txt
+recursive-include tests *.py
+recursive-include benchmarks *.json
+recursive-include deploy *

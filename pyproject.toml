@@ -5,13 +5,15 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tensorpilot"
 dynamic = ["version"]
-description = "Bounded local GPU inference serving and reproducible scheduling experiments"
+description = "Bounded GPU inference serving, distributed routing and reproducible experiments (MLX and CUDA)"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = ["aiohttp>=3.12,<4", "prometheus-client>=0.21,<1"]
 
 [project.optional-dependencies]
 mlx = ["mlx>=0.32.4,<0.33", "mlx-lm>=0.32.2,<0.33"]
+# Linux/NVIDIA worker. Deployments should install the locked requirements-cuda.txt instead.
+cuda = ["torch==2.9.1", "transformers==5.20.1"]
 test = ["pytest>=8,<10", "ruff>=0.11,<1"]
 
 [project.scripts]
@@ -33,6 +35,8 @@ tensorpilot-cluster-compare = "tensorpilot.cluster_compare:main"
 tensorpilot-cluster = "tensorpilot.cluster:main"
 tensorpilot-scale-bench = "tensorpilot.scale_bench:main"
 tensorpilot-synthetic-cluster = "tensorpilot.synthetic_cluster:main"
+tensorpilot-gpu-preflight = "tensorpilot.gpu_preflight:main"
+tensorpilot-gpu-bench = "tensorpilot.gpu_bench:main"
 
 [tool.setuptools.dynamic]
 version = {attr = "tensorpilot.__version__"}

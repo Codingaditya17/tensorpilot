@@ -1,4 +1,9 @@
-"""TensorPilot inference service. One process owns one MLX model."""
+"""TensorPilot inference service. One process owns one model on one accelerator.
+
+The MLX backend runs on Apple silicon. The CUDA backend runs on NVIDIA Linux hosts.
+Both satisfy the same InferenceBackend contract, so the HTTP API, admission and
+lifecycle behavior are identical across runtimes.
+"""
 import argparse
 import asyncio
 import hmac
@@ -15,16 +20,18 @@ from aiohttp import web
 from prometheus_client import CONTENT_TYPE_LATEST
 
 from . import __version__
-from .backend import MLXBackend
+from .backend import BACKENDS, MLXBackend
 from .bench import DEFAULT_MODEL
 from .engine import Engine, Overloaded
 from .batch_engine import BatchEngine
+from .cuda_backend import CUDABackend
 from .environment import source_fingerprint, dependency_versions
 from .metrics import Metrics
 from .scheduler import Scheduler
 from .ui import DASHBOARD_HTML
 from .admission import ResourceAdmission
 from .adaptive import AdaptiveBatchController
+from .gpu_telemetry import GPUTelemetry
 
 ENGINE = web.AppKey("engine", Engine)
 METRICS = web.AppKey("metrics", Metrics)
@@ -39,7 +46,7 @@ def create_app(factory, *, queue_size=8, max_tokens=256, max_timeout=120,
                prefill_step_size=256, batch_adapter_factory=None,
                admission_memory_bytes=512 * 1024**2, admission_bytes_per_token=16 * 1024,
                adaptive_latency_target_s=.25, adaptive_memory_soft_limit=.85,
-               adaptive_memory_hard_limit=.95):
+               adaptive_memory_hard_limit=.95, gpu_telemetry=None):
     metrics = Metrics()
     admission = ResourceAdmission(admission_memory_bytes, bytes_per_token=admission_bytes_per_token)
     options = {"metrics": metrics, "scheduler": scheduler, "admission": admission,
@@ -114,13 +121,17 @@ def create_app(factory, *, queue_size=8, max_tokens=256, max_timeout=120,
     app[ENGINE], app[METRICS] = engine, metrics
 
     async def lifecycle(app):
-        await engine.start(warmup)
+        if gpu_telemetry is not None:
+            await gpu_telemetry.start()
         try:
+            await engine.start(warmup)
             provenance = await engine.call(lambda: getattr(engine.backend, "provenance", {}))
             service_metadata.update(provenance)
             yield
         finally:
             await engine.close()
+            if gpu_telemetry is not None:
+                await gpu_telemetry.close()
 
     async def shutdown(app):
         await engine.close()
@@ -149,6 +160,7 @@ def create_app(factory, *, queue_size=8, max_tokens=256, max_timeout=120,
                                   "admission": engine.admission.snapshot(),
                                   "last_measured_memory": engine.last_memory_sample,
                                   "startup_profile": engine.startup_profile,
+                                  "gpu_telemetry": gpu_telemetry.snapshot() if gpu_telemetry else None,
                                   "runtime_profile": engine.runtime_profile(),
                                   "adaptive_policy": (engine.adaptive_controller.snapshot()
                                                       if getattr(engine, "adaptive_controller", None) else None),
@@ -225,16 +237,24 @@ def create_app(factory, *, queue_size=8, max_tokens=256, max_timeout=120,
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", default=DEFAULT_MODEL)
-    parser.add_argument("--revision", help="Hugging Face commit/tag; resolved commit and artifact hash are recorded")
+    parser.add_argument("--backend", choices=BACKENDS, default=os.environ.get("TENSORPILOT_BACKEND", "mlx"),
+                        help="mlx: Apple silicon; cuda: Linux NVIDIA through PyTorch and Transformers")
+    parser.add_argument("--model", default=os.environ.get("TENSORPILOT_MODEL", DEFAULT_MODEL),
+                        help="MLX model or Hugging Face repository; cuda needs a Transformers checkpoint")
+    parser.add_argument("--revision", default=os.environ.get("TENSORPILOT_REVISION"),
+                        help="Hugging Face commit/tag; resolved commit and artifact hash are recorded")
     parser.add_argument("--offline", action="store_true", help="load only an already-cached model snapshot")
+    parser.add_argument("--cache-dir", default=os.environ.get("TENSORPILOT_CACHE_DIR"),
+                        help="Hugging Face hub cache directory for downloaded snapshots")
     parser.add_argument("--profile-memory", action="store_true", help="opt-in per-token KV/MLX memory snapshots; adds overhead")
     parser.add_argument("--instance-id", help=argparse.SUPPRESS)
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--host", default=os.environ.get("TENSORPILOT_HOST", "127.0.0.1"))
+    parser.add_argument("--port", type=int, default=int(os.environ.get("TENSORPILOT_PORT", "8080")))
     parser.add_argument("--queue-size", type=int, default=8)
     parser.add_argument("--max-output-tokens", type=int, default=512,
                         help="service output cap (1..512)")
+    parser.add_argument("--max-prompt-tokens", type=int, default=2048,
+                        help="prompt token cap, enforced before inference (1..8192)")
     parser.add_argument("--execution", choices=("serial", "batch", "adaptive"), default="serial",
                         help="batch is opt-in real continuous MLX batching")
     parser.add_argument("--batch-size", type=int, default=2, help="maximum active batch sequences (1..8)")
@@ -245,7 +265,15 @@ def main():
                         help="estimated reservation pressure that caps adaptive width at two")
     parser.add_argument("--adaptive-memory-hard-limit", type=float, default=.95,
                         help="estimated reservation pressure that caps adaptive width at one")
-    parser.add_argument("--memory-gib", type=float, default=6)
+    parser.add_argument("--memory-gib", type=float, default=6, help="MLX memory limit")
+    parser.add_argument("--device", default=os.environ.get("TENSORPILOT_DEVICE", "cuda"),
+                        help="CUDA device, for example cuda or cuda:0")
+    parser.add_argument("--dtype", choices=("float16", "bfloat16", "float32"), default="float16",
+                        help="CUDA model weight dtype")
+    parser.add_argument("--cuda-memory-fraction", type=float, default=.9,
+                        help="per-process CUDA allocator cap in (0, 1]")
+    parser.add_argument("--gpu-telemetry-interval", type=float, default=2.0,
+                        help="nvidia-smi sample period in seconds; 0 disables; CUDA only")
     parser.add_argument("--admission-memory-mib", type=int, default=512,
                         help="estimated KV reservation budget; separate from measured MLX memory")
     parser.add_argument("--admission-bytes-per-token", type=int, default=16 * 1024,
@@ -259,6 +287,8 @@ def main():
     if (args.queue_size < 1 or not 0 < args.memory_gib <= 8 or
             not 1 <= args.max_output_tokens <= 512):
         parser.error("queue-size must be positive; memory-gib in (0, 8]; output cap in 1..512")
+    if not 1 <= args.max_prompt_tokens <= 8192:
+        parser.error("max-prompt-tokens must be in 1..8192")
     if args.admission_memory_mib < 1 or args.admission_bytes_per_token < 1:
         parser.error("admission memory and bytes-per-token must be positive")
     if not math.isfinite(args.max_queue_wait) or args.max_queue_wait <= 0:
@@ -272,21 +302,47 @@ def main():
         parser.error("adaptive target must be positive and 0 < soft memory limit < hard limit <= 1")
     if args.execution == "batch" and args.profile_memory:
         parser.error("--profile-memory is currently supported only by serial execution")
+    if args.backend == "cuda":
+        if args.model == DEFAULT_MODEL:
+            parser.error("--backend cuda needs --model naming a Transformers checkpoint; the MLX default is not loadable")
+        if args.execution != "serial":
+            parser.error("CUDA backend supports --execution serial only; batch execution is MLX-specific")
+        if args.profile_memory:
+            parser.error("--profile-memory is MLX-only")
+        if not 0 < args.cuda_memory_fraction <= 1:
+            parser.error("cuda-memory-fraction must be in (0, 1]")
+        if not math.isfinite(args.gpu_telemetry_interval) or args.gpu_telemetry_interval < 0:
+            parser.error("gpu-telemetry-interval must be finite and nonnegative")
     api_key = os.environ.get("TENSORPILOT_API_KEY")
     if args.host not in ("127.0.0.1", "localhost", "::1") and not api_key:
         parser.error("set TENSORPILOT_API_KEY before binding a non-loopback address")
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    metadata = {"model": args.model, "backend": "mlx", "warmup": True,
-                "mlx_lm_version": version("mlx-lm"), "mlx_version": version("mlx"),
-                "server_platform": platform.platform(), "server_python": platform.python_version(),
-                "source_sha256": source_fingerprint(), "dependencies": dependency_versions(),
-                "memory_limit_bytes": int(args.memory_gib * 1024**3),
-                "max_prompt_tokens": 2048, "max_output_tokens": args.max_output_tokens,
-                "queue_capacity": args.queue_size, "sampling": "greedy",
-                "prompt_format": "raw text, tokenizer default special tokens"}
-    app = create_app(lambda: MLXBackend(args.model, metadata["memory_limit_bytes"], 2048,
-                                      revision=args.revision, offline=args.offline,
-                                      profile_memory=args.profile_memory),
+    common = {"server_platform": platform.platform(), "server_python": platform.python_version(),
+              "source_sha256": source_fingerprint(), "dependencies": dependency_versions(),
+              "max_prompt_tokens": args.max_prompt_tokens, "max_output_tokens": args.max_output_tokens,
+              "queue_capacity": args.queue_size, "sampling": "greedy",
+              "prompt_format": "raw text, tokenizer default special tokens"}
+    telemetry = None
+    if args.backend == "mlx":
+        metadata = {"model": args.model, "backend": "mlx", "warmup": True,
+                    "mlx_lm_version": version("mlx-lm"), "mlx_version": version("mlx"),
+                    "memory_limit_bytes": int(args.memory_gib * 1024**3), **common}
+
+        def factory():
+            return MLXBackend(args.model, metadata["memory_limit_bytes"], args.max_prompt_tokens,
+                              revision=args.revision, offline=args.offline,
+                              profile_memory=args.profile_memory, cache_dir=args.cache_dir)
+    else:
+        metadata = {"model": args.model, "backend": "cuda", "warmup": True, **common}
+        if args.gpu_telemetry_interval > 0:
+            telemetry = GPUTelemetry(args.gpu_telemetry_interval)
+
+        def factory():
+            return CUDABackend(args.model, max_prompt_tokens=args.max_prompt_tokens,
+                               revision=args.revision, offline=args.offline, device=args.device,
+                               dtype=args.dtype, memory_fraction=args.cuda_memory_fraction,
+                               cache_dir=args.cache_dir)
+    app = create_app(factory,
                      queue_size=args.queue_size, max_tokens=args.max_output_tokens,
                      metadata=metadata, api_key=api_key,
                      scheduler=args.scheduler, max_queue_wait_s=args.max_queue_wait,
@@ -297,7 +353,8 @@ def main():
                      admission_bytes_per_token=args.admission_bytes_per_token,
                      adaptive_latency_target_s=args.adaptive_latency_target,
                      adaptive_memory_soft_limit=args.adaptive_memory_soft_limit,
-                     adaptive_memory_hard_limit=args.adaptive_memory_hard_limit)
+                     adaptive_memory_hard_limit=args.adaptive_memory_hard_limit,
+                     gpu_telemetry=telemetry)
     web.run_app(app, host=args.host, port=args.port, handler_cancellation=True, access_log=None)
 
 
