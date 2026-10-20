@@ -30,6 +30,7 @@ tensorpilot-kernel-capture = "tensorpilot.kernel_capture:main"
 tensorpilot-control-plane = "tensorpilot.control_plane:main"
 tensorpilot-cluster-compare = "tensorpilot.cluster_compare:main"
 tensorpilot-cluster = "tensorpilot.cluster:main"
+tensorpilot-scale-bench = "tensorpilot.scale_bench:main"
 
 [tool.setuptools.dynamic]
 version = {attr = "tensorpilot.__version__"}

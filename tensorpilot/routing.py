@@ -1,6 +1,6 @@
 """Worker registry and deterministic cluster placement policies."""
 from dataclasses import asdict, dataclass, field
-from collections import deque
+from collections import defaultdict, deque
 import math
 import re
 import time
@@ -69,7 +69,7 @@ class Placement:
 
 
 class WorkerRegistry:
-    POLICIES = ("capacity-aware", "round-robin")
+    POLICIES = ("capacity-aware", "round-robin", "power-of-two")
 
     def __init__(self, *, stale_after_s=5.0, policy="capacity-aware", clock=time.monotonic):
         if not math.isfinite(stale_after_s) or stale_after_s <= 0:
@@ -84,6 +84,9 @@ class WorkerRegistry:
         self.placements = 0
         self.history = deque(maxlen=100)
         self.lifecycle = deque(maxlen=100)
+        self.compatible = defaultdict(list)
+        self.compatibility_key = {}
+        self.cursors = defaultdict(int)
 
     @staticmethod
     def validate_identity(worker_id, url, allowed_hosts):
@@ -116,6 +119,7 @@ class WorkerRegistry:
     def update(self, worker_id, health):
         worker = self.workers[worker_id]
         previous_instance = worker.instance_id
+        previous_compatibility = self.compatibility_key.get(worker_id)
         admission = health.get("admission") or {}
         worker.ready = health.get("ready") is True
         worker.active_sequences = _nonnegative_int(health.get("active_sequences", 0), "active_sequences")
@@ -136,6 +140,14 @@ class WorkerRegistry:
         worker.last_error = None
         worker.metadata = {key: health.get(key) for key in
                            ("execution_mode", "mlx_device", "model_revision") if key in health}
+        compatibility = (worker.model, worker.artifact_sha256)
+        if compatibility != previous_compatibility:
+            self.compatibility_key[worker_id] = compatibility
+            if previous_compatibility is None:
+                self.compatible[(None, None)].append(worker_id)
+            self.compatible[(worker.model, None)].append(worker_id)
+            self.compatible[(None, worker.artifact_sha256)].append(worker_id)
+            self.compatible[compatibility].append(worker_id)
         if previous_instance is not None and previous_instance != worker.instance_id:
             self.lifecycle.append({"at_monotonic_s": worker.last_seen, "event": "worker_instance_changed",
                                    "worker_id": worker_id, "previous_instance_id": previous_instance,
@@ -164,6 +176,7 @@ class WorkerRegistry:
         if worker.in_flight_routes:
             raise ValueError("worker has in-flight routed requests")
         removed = self.workers.pop(worker_id)
+        self.compatibility_key.pop(worker_id, None)
         self.lifecycle.append({"at_monotonic_s": self.clock(), "event": "worker_removed",
                                "worker_id": worker_id})
         return removed
@@ -173,30 +186,33 @@ class WorkerRegistry:
         eligible = []
         excluded = {"not_ready": 0, "draining": 0, "stale": 0, "no_slots": 0,
                     "model_mismatch": 0, "artifact_mismatch": 0, "memory_pressure": 0}
-        for worker in self.workers.values():
-            if not worker.ready:
-                excluded["not_ready"] += 1
-                continue
-            if worker.draining:
-                excluded["draining"] += 1
-                continue
-            if now - worker.last_seen > self.stale_after_s:
-                excluded["stale"] += 1
-                continue
-            if worker.available_slots < 1:
-                excluded["no_slots"] += 1
-                continue
-            if model is not None and worker.model != model:
-                excluded["model_mismatch"] += 1
-                continue
-            if artifact_sha256 is not None and worker.artifact_sha256 != artifact_sha256:
-                excluded["artifact_mismatch"] += 1
-                continue
-            free_memory = worker.estimated_kv_budget_bytes - worker.estimated_kv_reserved_bytes
-            if estimated_kv_bytes > free_memory:
-                excluded["memory_pressure"] += 1
-                continue
-            eligible.append(worker)
+        if self.policy == "power-of-two":
+            key = (model, artifact_sha256)
+            pool = self.compatible.get(key, ())
+            cursor = self.cursors[key]
+            inspected = 0
+            seen = set()
+            # Two eligible choices keep the hot path constant-time. Invalid/tombstoned
+            # entries are skipped; a full scan below preserves exact no-capacity behavior.
+            while inspected < len(pool) and inspected < 32 and len(eligible) < 2:
+                worker_id = pool[(cursor + inspected) % len(pool)]
+                worker = self.workers.get(worker_id)
+                if (worker_id not in seen and worker is not None and self.compatibility_key.get(worker_id) ==
+                        (worker.model, worker.artifact_sha256) and
+                        _eligible(worker, now, self.stale_after_s, estimated_kv_bytes,
+                                  model, artifact_sha256) is None):
+                    eligible.append(worker)
+                    seen.add(worker_id)
+                inspected += 1
+            self.cursors[key] = cursor + max(1, inspected)
+        if self.policy != "power-of-two" or not eligible:
+            for worker in self.workers.values():
+                reason = _eligible(worker, now, self.stale_after_s, estimated_kv_bytes,
+                                   model, artifact_sha256)
+                if reason is None:
+                    eligible.append(worker)
+                else:
+                    excluded[reason] += 1
         if not eligible:
             self.history.append({"at_monotonic_s": now, "request_id": request_id,
                                  "outcome": "rejected", "estimated_kv_bytes": estimated_kv_bytes,
@@ -214,7 +230,8 @@ class WorkerRegistry:
                 load = (worker.active_sequences + worker.queue_depth + worker.in_flight_routes) / capacity
                 return load, worker.memory_pressure, worker.assigned_total, worker.worker_id
             worker = min(eligible, key=score)
-            reason = "lowest-load-then-memory"
+            reason = ("power-of-two-load-then-memory" if self.policy == "power-of-two"
+                      else "lowest-load-then-memory")
         capacity = worker.execution_concurrency + worker.queue_capacity
         load = (worker.active_sequences + worker.queue_depth + worker.in_flight_routes) / capacity
         worker.in_flight_routes += 1
@@ -261,3 +278,22 @@ def _optional_string(value, name):
     if value is not None and (not isinstance(value, str) or not value):
         raise ValueError(f"{name} must be a nonempty string or null")
     return value
+
+
+def _eligible(worker, now, stale_after_s, estimated_kv_bytes, model, artifact_sha256):
+    if not worker.ready:
+        return "not_ready"
+    if worker.draining:
+        return "draining"
+    if now - worker.last_seen > stale_after_s:
+        return "stale"
+    if worker.available_slots < 1:
+        return "no_slots"
+    if model is not None and worker.model != model:
+        return "model_mismatch"
+    if artifact_sha256 is not None and worker.artifact_sha256 != artifact_sha256:
+        return "artifact_mismatch"
+    free_memory = worker.estimated_kv_budget_bytes - worker.estimated_kv_reserved_bytes
+    if estimated_kv_bytes > free_memory:
+        return "memory_pressure"
+    return None

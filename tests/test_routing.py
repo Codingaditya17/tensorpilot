@@ -108,3 +108,23 @@ def test_instance_change_and_drain_are_in_bounded_lifecycle_history():
     events = [event["event"] for event in workers.snapshot()["lifecycle_history"]]
     assert "worker_instance_changed" in events
     assert events[-1] == "worker_drain_changed"
+
+
+def test_power_of_two_uses_compatible_index_and_preserves_filters():
+    workers = WorkerRegistry(policy="power-of-two", clock=lambda: 0)
+    for index in range(100):
+        worker_id = f"worker-{index}"
+        workers.register(worker_id, f"http://127.0.0.1:{9000 + index}")
+        workers.update(worker_id, health(model="wanted" if index < 50 else "other"))
+    selected = []
+    for _ in range(100):
+        placement = workers.select(1, model="wanted", artifact_sha256="sha-a")
+        selected.append(placement.worker_id)
+        workers.release(placement.worker_id)
+    assert len(set(selected)) == 50
+    assert all(int(worker_id.split("-")[1]) < 50 for worker_id in selected)
+    for index in range(50):
+        workers.set_draining(f"worker-{index}", True)
+    assert workers.select(1, model="wanted", artifact_sha256="sha-a") is None
+    rejection = workers.snapshot()["placement_history"][-1]
+    assert rejection["excluded"]["draining"] == 50

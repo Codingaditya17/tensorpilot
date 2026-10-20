@@ -307,3 +307,27 @@ Evidence: `results/v07_two_worker_load.json`, `results/v07_drain_load.json`,
 `results/v07_inflight_worker_crash.json`, `results/v07_cluster_health_recovered.json`,
 `results/v07_single_worker_run*.json`, `results/v07_two_worker_run*.json`,
 `results/v07_cluster_comparison.json` and `results/v07_final_cluster_*`.
+
+## v0.8 scalability baseline and first routing candidate — 2026-10-20
+
+Preserved v0.7 commit `675d1fba65092183467b86dbe5b525ccdb2a871a` and
+created branch `codex/v08-distributed-scale`. Added a bounded, GPU-free registry
+saturation benchmark that records placement latency/throughput, heartbeat-update
+cost, snapshot cost, traced Python memory and assignment fairness. It supports up
+to 10,000 synthetic workers and one million placements with explicit hard limits.
+
+The 20,000-placement baseline measured 9,258, 2,164 and 1,060 placements/s at
+100, 500 and 1,000 workers. Median placement latency increased from 102.8 to
+452.8 to 901.3 microseconds, confirming the v0.7 full-registry scan as an O(N)
+bottleneck.
+
+Added an opt-in indexed power-of-two policy without changing v0.7's default
+capacity-aware semantics. On the same workloads it measured 42,248, 56,905 and
+56,358 placements/s, with 15.2–15.3 microsecond median latency. At 1,000 workers
+this is 53.2× baseline throughput and 98.3% lower median decision latency. Every
+worker received exactly 20 assignments in the uniform 1,000-worker workload.
+
+This result isolates synchronous registry cost. It does not include HTTP, global
+lock contention, network faults or GPU inference. The 1,000-worker snapshot was
+about 745 KB and required 36–40 ms, identifying full health serialization as the
+next scaling target. Evidence is under `results/v08_scale_baseline/`.
