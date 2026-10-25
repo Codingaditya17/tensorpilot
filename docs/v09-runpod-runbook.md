@@ -54,6 +54,10 @@ Do not rent or start a Pod until the GO/NO-GO checklist in
 
 ## 3. Pod start and environment
 
+**Rented Pod: use the experiment image and follow [`v09-runpod-experiment-pod.md`](v09-runpod-experiment-pod.md).**
+It ships the scripts and configs, SSH, and a hard-capped `first-run.sh`. The steps below are for a bare
+environment you set up yourself.
+
 On the Pod, from the repository root (the session script changes to the repository
 root itself):
 
@@ -171,8 +175,8 @@ sha256sum -c "$TENSORPILOT_RESULTS.tar.gz.sha256"
 tar -tzf "$TENSORPILOT_RESULTS.tar.gz" | head
 ```
 
-Download the archive and its `.sha256` file with your transfer tool, then run the same
-checksum check on your own machine. Only after that check passes should you treat the
+Download the archive with `scp` (exact command in `v09-runpod-experiment-pod.md`) and compare
+`shasum -a 256` on your machine with the hash the session printed. Only after that check passes should you treat the
 evidence as saved.
 
 ## 9. Teardown and billable-resource checklist

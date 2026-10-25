@@ -26,6 +26,7 @@ jobs:
                  TENSORPILOT_REVISION=7ae557604adf67be50417f59c2c2f167def9a775
           deploy/runpod/session.sh --plan > /dev/null
           deploy/runpod/two_gpu_session.sh --plan > /dev/null
+          env -u TENSORPILOT_API_KEY -u TENSORPILOT_CONTROL_API_KEY -u TENSORPILOT_DATA_API_KEY deploy/runpod/first-run.sh --plan > /dev/null
           ! TENSORPILOT_API_KEY=b deploy/runpod/session.sh --plan 2> /dev/null
           ! TENSORPILOT_REVISION=main deploy/runpod/two_gpu_session.sh --plan 2> /dev/null
       - name: Benchmark configs validate

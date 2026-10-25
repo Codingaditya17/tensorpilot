@@ -78,18 +78,41 @@ fi
 
 mkdir -p "$RESULTS"
 PIDS=()
+ARCHIVED=0
+ARCHIVE="$RESULTS.tar.gz"
+archive_evidence() {
+  local key
+  for key in "$TENSORPILOT_API_KEY" "$TENSORPILOT_CONTROL_API_KEY" "$TENSORPILOT_DATA_API_KEY"; do
+    if grep -rqF -- "$key" "$RESULTS"; then
+      echo "a credential value appears in the evidence directory; refusing to archive" >&2
+      return 1
+    fi
+  done
+  tar -C "$(dirname "$RESULTS")" -czf "$ARCHIVE" "$(basename "$RESULTS")"
+  sha256sum "$ARCHIVE" | tee "$ARCHIVE.sha256"
+  tar -tzf "$ARCHIVE" >/dev/null && echo "archive readable: $ARCHIVE"
+  ARCHIVED=1
+}
 cleanup() {
   local status=$?
+  trap - EXIT
   for pid in ${PIDS[@]+"${PIDS[@]}"}; do
     kill -TERM "$pid" 2>/dev/null || true
   done
   for pid in ${PIDS[@]+"${PIDS[@]}"}; do
     wait "$pid" 2>/dev/null || true
   done
+  # A failed or timed-out run is when evidence matters most: archive whatever exists.
+  if [[ $ARCHIVED -eq 0 ]]; then
+    echo "session ended before the archive step; archiving partial evidence" >&2
+    archive_evidence || true
+  fi
   echo "teardown complete (exit $status). Download the evidence, then terminate the Pod." >&2
   exit "$status"
 }
 trap cleanup EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
 
 wait_for_ready() {
   local url="$1" pid="$2" timeout_s="$3" elapsed=0
@@ -150,15 +173,6 @@ TENSORPILOT_API_KEY="$TENSORPILOT_API_KEY" timeout "$BENCH_TIMEOUT" python3 -m t
   "$BENCH_CONFIG" --url "http://127.0.0.1:$WORKER_PORT" --output-dir "$RESULTS/bench" | tee "$RESULTS/bench-run.log"
 
 echo "[6/7] secret scan and evidence archive"
-for key in "$TENSORPILOT_API_KEY" "$TENSORPILOT_CONTROL_API_KEY" "$TENSORPILOT_DATA_API_KEY"; do
-  if grep -rqF -- "$key" "$RESULTS"; then
-    echo "a credential value appears in the evidence directory; refusing to archive" >&2
-    exit 1
-  fi
-done
-ARCHIVE="$RESULTS.tar.gz"
-tar -C "$(dirname "$RESULTS")" -czf "$ARCHIVE" "$(basename "$RESULTS")"
-sha256sum "$ARCHIVE" | tee "$ARCHIVE.sha256"
-tar -tzf "$ARCHIVE" >/dev/null && echo "archive readable: $ARCHIVE"
+archive_evidence || exit 1
 
 echo "[7/7] stopping started processes"

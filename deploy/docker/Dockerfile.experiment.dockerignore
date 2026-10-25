@@ -1,0 +1,6 @@
+# Allowlist: the experiment image gets only the scripts, configs and docs it needs.
+*
+!deploy/runpod
+!benchmarks/gpu
+!docs/v09-runpod-runbook.md
+!docs/v09-runpod-experiment-pod.md

@@ -1,0 +1,44 @@
+# TensorPilot experiment Pod image: the published production worker image plus SSH, the session
+# scripts and the benchmark configs. The production image (Dockerfile.cuda) is not modified; this
+# layer only adds files and an SSH entrypoint, and is published as a separate package.
+#
+# Base pinned by digest: ghcr.io/codingaditya17/tensorpilot/cuda:v0.9.1. Update deliberately.
+ARG BASE=ghcr.io/codingaditya17/tensorpilot/cuda@sha256:afdc5dc6646040cb486654cc6722a20f2d21a9c080f96ac5f33145a6a1da825a
+FROM ${BASE}
+
+# Root is required only for the entrypoint to start sshd and prepare /workspace. Every TensorPilot
+# process runs as the unprivileged tensorpilot user after an SSH login.
+# hadolint ignore=DL3002,DL3066
+USER root
+# hadolint ignore=DL3008
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends openssh-server curl ca-certificates procps less tmux \
+ && rm -rf /var/lib/apt/lists/* \
+ && mkdir -p /run/sshd \
+ && usermod --shell /bin/bash --password '*' tensorpilot
+
+# Read-only, root-owned. Runtime output goes to /workspace, never here.
+COPY deploy/runpod /opt/tensorpilot/deploy/runpod
+COPY benchmarks/gpu /opt/tensorpilot/benchmarks/gpu
+COPY docs/v09-runpod-runbook.md docs/v09-runpod-experiment-pod.md /opt/tensorpilot/docs/
+COPY deploy/runpod/pod_sshd_config /etc/ssh/sshd_config
+RUN chmod 0755 /opt/tensorpilot/deploy/runpod/*.sh && chmod 0644 /etc/ssh/sshd_config
+
+# First experiment: measured work is capped by the benchmark timeout; the whole run by the session cap.
+ENV TENSORPILOT_CACHE_DIR=/workspace/huggingface \
+    HF_HOME=/workspace/huggingface \
+    TENSORPILOT_BENCH_CONFIG=benchmarks/gpu/v09-first-30min.json \
+    TENSORPILOT_BENCH_TIMEOUT=25m \
+    TENSORPILOT_SESSION_CAP=45m \
+    TENSORPILOT_POD_MAX_MINUTES=120
+
+# sshd is the only listener. TensorPilot binds 127.0.0.1 and is reached through SSH.
+EXPOSE 22
+VOLUME ["/workspace"]
+WORKDIR /opt/tensorpilot
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD ["bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/22"]
+
+ENTRYPOINT ["/opt/tensorpilot/deploy/runpod/pod-entrypoint.sh"]
+STOPSIGNAL SIGTERM
