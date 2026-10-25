@@ -12,5 +12,6 @@ fi
 if [[ "${1:-}" == "--plan" ]]; then
   exec "$ROOT/deploy/runpod/session.sh" --plan
 fi
+echo "evidence root: ${TENSORPILOT_RESULTS_ROOT:-/workspace/results}; cache: ${TENSORPILOT_CACHE_DIR:-/workspace/huggingface}" >&2
 echo "session cap ${TENSORPILOT_SESSION_CAP:-45m}; benchmark cap ${TENSORPILOT_BENCH_TIMEOUT:-25m}" >&2
 exec timeout --signal=TERM --kill-after=60s "${TENSORPILOT_SESSION_CAP:-45m}" "$ROOT/deploy/runpod/session.sh"

@@ -46,7 +46,7 @@ REQUESTS="${TENSORPILOT_LOAD_REQUESTS:-60}"
 CONCURRENCY="${TENSORPILOT_LOAD_CONCURRENCY:-8}"
 PHASE_TIMEOUT="${TENSORPILOT_PHASE_TIMEOUT:-10m}"
 CACHE_DIR="${TENSORPILOT_CACHE_DIR:-/workspace/huggingface}"
-RESULTS="${TENSORPILOT_RESULTS:-/workspace/results/v09-two-gpu-$(date -u +%Y%m%dT%H%M%SZ)}"
+RESULTS="${TENSORPILOT_RESULTS:-${TENSORPILOT_RESULTS_ROOT:-/workspace/results}/v09-two-gpu-$(date -u +%Y%m%dT%H%M%SZ)}"
 
 if [[ $PLAN_ONLY -eq 1 ]]; then
   cat <<PLAN

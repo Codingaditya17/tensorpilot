@@ -54,7 +54,7 @@ DATA_PORT="${TENSORPILOT_DATA_PORT:-8091}"
 BENCH_CONFIG="${TENSORPILOT_BENCH_CONFIG:-benchmarks/gpu/v09-first-30min.json}"
 BENCH_TIMEOUT="${TENSORPILOT_BENCH_TIMEOUT:-35m}"
 CACHE_DIR="${TENSORPILOT_CACHE_DIR:-/workspace/huggingface}"
-RESULTS="${TENSORPILOT_RESULTS:-/workspace/results/v09-$(date -u +%Y%m%dT%H%M%SZ)}"
+RESULTS="${TENSORPILOT_RESULTS:-${TENSORPILOT_RESULTS_ROOT:-/workspace/results}/v09-$(date -u +%Y%m%dT%H%M%SZ)}"
 
 if [[ $PLAN_ONLY -eq 1 ]]; then
   cat <<PLAN

@@ -25,9 +25,9 @@ COPY deploy/runpod/pod_sshd_config /etc/ssh/sshd_config
 RUN chmod 0755 /opt/tensorpilot/deploy/runpod/*.sh && chmod 0644 /etc/ssh/sshd_config
 
 # First experiment: measured work is capped by the benchmark timeout; the whole run by the session cap.
-ENV TENSORPILOT_CACHE_DIR=/workspace/huggingface \
-    HF_HOME=/workspace/huggingface \
-    TENSORPILOT_BENCH_CONFIG=benchmarks/gpu/v09-first-30min.json \
+# Evidence and cache directories are chosen at start by pod-entrypoint.sh (a verified writable
+# location) and exported to SSH sessions; they are deliberately not fixed here.
+ENV TENSORPILOT_BENCH_CONFIG=benchmarks/gpu/v09-first-30min.json \
     TENSORPILOT_BENCH_TIMEOUT=25m \
     TENSORPILOT_SESSION_CAP=45m \
     TENSORPILOT_POD_MAX_MINUTES=120

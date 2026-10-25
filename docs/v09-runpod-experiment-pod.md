@@ -6,9 +6,9 @@ a separate package, so the production image is untouched.
 
 | | |
 |---|---|
-| Image | `ghcr.io/codingaditya17/tensorpilot/cuda-experiment:v0.9.1-1` |
+| Image | `ghcr.io/codingaditya17/tensorpilot/cuda-experiment:v0.9.1-2` |
 | Built from | `ghcr.io/codingaditya17/tensorpilot/cuda@sha256:afdc5dc6646040cb486654cc6722a20f2d21a9c080f96ac5f33145a6a1da825a` (v0.9.1) |
-| Published by | git tag `exp-v0.9.1-1` (workflow `experiment-image.yml`). Never moved: a fix gets `exp-v0.9.1-2`. |
+| Published by | git tag `exp-v0.9.1-2` (workflow `experiment-image.yml`). Never moved: a fix gets `exp-v0.9.1-3`. |
 | Registry login | none; the package must be public (check anonymously before renting) |
 
 Nothing here has run on a GPU. The image behavior below was verified without one by
@@ -30,6 +30,22 @@ Nothing here has run on a GPU. The image behavior below was verified without one
 | Jupyter / extra services | off |
 
 The Pod volume is deleted with the Pod, so the evidence must be downloaded first (below).
+
+## Storage: where evidence and the model cache go
+
+At start the entrypoint picks each directory by testing it, not by trusting `chown`:
+1. `/workspace/results` and `/workspace/huggingface` (the mounted volume) if the `tensorpilot` user can create,
+   read back and delete a file there, trying `chown` only if that first test fails;
+2. otherwise `/home/tensorpilot/work/...` on the **container disk**, with a `WARNING` in the container log;
+3. otherwise the container exits with `no writable storage for ...` and a diagnostic (owner, mount, free space).
+
+`v0.9.1-1` crashed on Runpod because it treated a refused `chown` on the volume as fatal. The log of a Pod that took
+the fallback shows `storage: chown of /workspace/results refused: ...` followed by `WARNING results -> /home/...`.
+Every SSH login prints `TensorPilot Pod: evidence -> <dir> | model cache -> <dir>`. **Use that path for the export.**
+`first-run.sh`, `session.sh` and the cache all follow the selected directories.
+
+If the fallback was used, evidence lives on the container disk, which does not survive a Pod stop or the 120-minute
+backstop exit. Export it before either.
 
 ## Start (about 45 minutes, hard-capped)
 
@@ -54,10 +70,11 @@ To look at the dashboard, tunnel it: `ssh -L 8080:127.0.0.1:8080 -p <port> tenso
 
 ## Export the evidence (before terminating)
 
-On the Pod, `first-run.sh` ends by printing the archive path and its SHA-256. From your laptop:
+On the Pod, `first-run.sh` ends by printing the archive path and its SHA-256, and your login banner shows the
+evidence directory (`/workspace/results` unless the fallback was used). From your laptop:
 
 ```bash
-scp -i ~/.ssh/<your-key> -P <public-port> 'tensorpilot@<public-ip>:/workspace/results/*.tar.gz*' .
+scp -i ~/.ssh/<your-key> -P <public-port> 'tensorpilot@<public-ip>:<evidence-dir>/*.tar.gz*' .
 shasum -a 256 v09-*.tar.gz     # must equal the hash printed on the Pod
 tar -tzf v09-*.tar.gz | head
 ```

@@ -37,11 +37,11 @@ refuses "root login refused" ssh -p "$PORT" -i "$WORK/id" -o IdentitiesOnly=yes 
   -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=5 root@127.0.0.1 true
 refuses "password login refused" ssh -p "$PORT" -o PubkeyAuthentication=no -o PreferredAuthentications=password \
   -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=5 tensorpilot@127.0.0.1 true
-check "non-root can write evidence dir" pod 'touch /workspace/results/w && rm /workspace/results/w'
-check "non-root can write model cache dir" pod 'touch /workspace/huggingface/w && rm /workspace/huggingface/w'
+check "non-root can write evidence dir" pod 'touch "$TENSORPILOT_RESULTS_ROOT/w" && rm "$TENSORPILOT_RESULTS_ROOT/w"'
+check "non-root can write model cache dir" pod 'touch "$TENSORPILOT_CACHE_DIR/w" && rm "$TENSORPILOT_CACHE_DIR/w"'
 refuses "scripts and configs are read-only" pod 'touch /opt/tensorpilot/benchmarks/gpu/x'
 check "benchmark configs shipped" pod 'test -f benchmarks/gpu/v09-first-30min.json && test -f benchmarks/gpu/v09-single-gpu.json'
-check "non-secret settings reach SSH sessions" pod '[ -n "$TENSORPILOT_MODEL" ] && [ "$TENSORPILOT_REVISION" = 7ae557604adf67be50417f59c2c2f167def9a775 ] && [ "$HF_HOME" = /workspace/huggingface ]'
+check "non-secret settings reach SSH sessions" pod '[ -n "$TENSORPILOT_MODEL" ] && [ "$TENSORPILOT_REVISION" = 7ae557604adf67be50417f59c2c2f167def9a775 ] && [ "$HF_HOME" = /workspace/huggingface ] && [ "$TENSORPILOT_CACHE_DIR" = /workspace/huggingface ] && [ "$TENSORPILOT_RESULTS_ROOT" = /workspace/results ]'
 refuses "API keys are not forwarded or stored" pod 'env | grep -q API_KEY || grep -rq API_KEY /etc/profile.d'
 check "first-run.sh --plan validates" pod 'first-run.sh --plan'
 LISTEN="$(pod "python3 -c \"
@@ -54,9 +54,9 @@ print(ports)\"" 2>/dev/null)"
 pod 'TENSORPILOT_SESSION_CAP=5m first-run.sh' >"$WORK/run.log" 2>&1
 RC=$?
 [[ $RC -ne 0 ]] && pass "session stops without a GPU (exit $RC)" || fail "session stops without a GPU"
-check "partial evidence archived with checksum after failure" pod 'ls /workspace/results/*.tar.gz /workspace/results/*.tar.gz.sha256'
-check "archive passes tar integrity check" pod 'tar -tzf /workspace/results/*.tar.gz'
-check "archive holds diagnostics and the preflight failure" pod 'tar -tzf /workspace/results/*.tar.gz | grep -q diagnostics/system.txt && tar -tzf /workspace/results/*.tar.gz | grep -q preflight.json'
+check "partial evidence archived with checksum after failure" pod 'ls "$TENSORPILOT_RESULTS_ROOT"/*.tar.gz "$TENSORPILOT_RESULTS_ROOT"/*.tar.gz.sha256'
+check "archive passes tar integrity check" pod 'tar -tzf "$TENSORPILOT_RESULTS_ROOT"/*.tar.gz'
+check "archive holds diagnostics and the preflight failure" pod 'tar -tzf "$TENSORPILOT_RESULTS_ROOT"/*.tar.gz | grep -q diagnostics/system.txt && tar -tzf "$TENSORPILOT_RESULTS_ROOT"/*.tar.gz | grep -q preflight.json'
 pod 'TENSORPILOT_SESSION_CAP=2s first-run.sh' >"$WORK/cap.log" 2>&1
 [[ $? -ne 0 ]] && pass "session cap fires and the run ends" || fail "session cap fires and the run ends"
 
@@ -71,5 +71,45 @@ if [[ "$SLOW" == "--slow" ]]; then
   [[ "$(docker inspect -f '{{.State.Status}}' "$NAME-life")" == exited ]] && pass "lifetime backstop exits the container" || fail "lifetime backstop exits the container"
   docker rm -f "$NAME-life" >/dev/null 2>&1
 fi
+
+# Regression: a mounted volume that refuses chown (the Runpod failure: "chown: ... Operation not permitted").
+# Dropping CAP_CHOWN makes root's chown fail with the same EPERM. Named volumes, like Runpod's, start root-owned.
+wait_ssh() { for _ in $(seq 1 30); do pod true 2>/dev/null && return 0; sleep 2; done; return 1; }
+VOLS=()
+mkvol() { local v="tp-pod-test-$1-$$"; docker volume create "$v" >/dev/null; VOLS+=("$v"); echo "$v"; }
+cleanup_volumes() { for v in ${VOLS[@]+"${VOLS[@]}"}; do docker volume rm -f "$v" >/dev/null 2>&1 || true; done; }
+trap 'cleanup; cleanup_volumes' EXIT
+
+echo "--- scenario: chown refused, volume root-owned (falls back to container disk)"
+V="$(mkvol a)"
+docker run -d --name "$NAME-a" --cap-drop CHOWN -p "127.0.0.1:$PORT:22" -e "PUBLIC_KEY=$PUB" -v "$V:/workspace" "$IMAGE" >/dev/null
+wait_ssh && pass "container starts although chown is refused" || fail "container starts although chown is refused"
+LOGS="$(docker logs "$NAME-a" 2>&1)"
+grep -q "chown of /workspace/results refused" <<<"$LOGS" && pass "refusal is reported, not hidden" || fail "refusal is reported, not hidden"
+grep -q "storage diagnostic for /workspace/results" <<<"$LOGS" && pass "diagnostic printed for the unusable volume" || fail "diagnostic printed for the unusable volume"
+grep -q "WARNING results -> /home/tensorpilot/work/results" <<<"$LOGS" && pass "fallback announced as a warning" || fail "fallback announced as a warning"
+[[ "$(pod 'echo "$TENSORPILOT_RESULTS_ROOT $TENSORPILOT_CACHE_DIR $HF_HOME"' 2>/dev/null)" == "/home/tensorpilot/work/results /home/tensorpilot/work/huggingface /home/tensorpilot/work/huggingface" ]] \
+  && pass "results, cache and HF_HOME all follow the fallback" || fail "results, cache and HF_HOME all follow the fallback"
+check "non-root really writes to the fallback evidence dir" pod 'touch "$TENSORPILOT_RESULTS_ROOT/w" && rm "$TENSORPILOT_RESULTS_ROOT/w"'
+pod 'first-run.sh --plan' 2>/dev/null | grep -q "/home/tensorpilot/work/results/v09-" && pass "first-run.sh plan uses the fallback results path" || fail "first-run.sh plan uses the fallback results path"
+pod 'TENSORPILOT_SESSION_CAP=5m first-run.sh' >/dev/null 2>&1
+check "evidence archived under the fallback path after a failed run" pod 'ls "$TENSORPILOT_RESULTS_ROOT"/*.tar.gz.sha256'
+docker rm -f "$NAME-a" >/dev/null 2>&1
+
+echo "--- scenario: chown refused but the volume is already owned by the user (uses the volume)"
+V="$(mkvol b)"
+docker run --rm -v "$V:/w" --entrypoint chown "$IMAGE" 10001:10001 /w
+docker run -d --name "$NAME-b" --cap-drop CHOWN -p "127.0.0.1:$PORT:22" -e "PUBLIC_KEY=$PUB" -v "$V:/workspace" "$IMAGE" >/dev/null
+wait_ssh && pass "container starts with a pre-owned volume" || fail "container starts with a pre-owned volume"
+[[ "$(pod 'echo "$TENSORPILOT_RESULTS_ROOT $TENSORPILOT_CACHE_DIR"' 2>/dev/null)" == "/workspace/results /workspace/huggingface" ]] \
+  && pass "mounted volume used when it is verifiably writable" || fail "mounted volume used when it is verifiably writable"
+check "non-root writes to the mounted volume" pod 'touch "$TENSORPILOT_RESULTS_ROOT/w" && rm "$TENSORPILOT_RESULTS_ROOT/w"'
+docker rm -f "$NAME-b" >/dev/null 2>&1
+
+echo "--- scenario: nothing writable anywhere (must fail with a clear diagnostic)"
+V="$(mkvol c)"
+OUT="$(docker run --rm --read-only --cap-drop CHOWN -e "PUBLIC_KEY=$PUB" -v "$V:/workspace" "$IMAGE" 2>&1)"; RC=$?
+[[ $RC -ne 0 ]] && pass "exits non-zero when no storage is writable (exit $RC)" || fail "exits non-zero when no storage is writable"
+grep -q "no writable storage for results" <<<"$OUT" && pass "failure names the problem and both locations" || fail "failure names the problem and both locations"
 echo "failures: $FAILS"
 exit $(( FAILS > 0 ))
