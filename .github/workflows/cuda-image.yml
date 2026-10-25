@@ -97,11 +97,14 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Lowercase image name (registry names must be lowercase)
+        id: image
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}/cuda" >> "$GITHUB_OUTPUT"
       - uses: docker/build-push-action@v6
         with:
           context: .
           file: deploy/docker/Dockerfile.cuda
           platforms: linux/amd64
           push: true
-          tags: ghcr.io/${{ github.repository }}/cuda:${{ github.ref_name }}
+          tags: ${{ steps.image.outputs.name }}:${{ github.ref_name }}
           cache-from: type=gha
