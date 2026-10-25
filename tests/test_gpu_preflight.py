@@ -1,20 +1,29 @@
-"""GPU preflight decisions with injected probes. No GPU is required to run these."""
+"""GPU preflight decisions with injected probes. No GPU, Hub access or network is used."""
 import asyncio
+from types import SimpleNamespace
 
 from tensorpilot.backend import Token
-from tensorpilot.gpu_preflight import GIB, run_preflight
+from tensorpilot.gpu_preflight import GIB, driver_check, pins_check, remote_revision_check, run_preflight
 
 GOOD_REVISION = "a" * 40
-MEASURED = {"status": "measured", "source": "nvidia-smi",
-            "devices": [{"index": 0, "name": "NVIDIA L4"}]}
-TORCH_OK = {"importable": True, "torch_version": "2.9.1", "cuda_runtime": "12.8", "cuda_available": True,
+PINS = {"torch": "2.9.1", "transformers": "5.20.1"}
+
+
+def measured(driver="570.26"):
+    return {"status": "measured", "source": "nvidia-smi",
+            "devices": [{"index": 0, "name": "NVIDIA L4", "driver_version": driver}]}
+
+
+TORCH_OK = {"importable": True, "torch_version": "2.9.1+cu128", "cuda_runtime": "12.8", "cuda_available": True,
             "devices": [{"index": 0, "name": "NVIDIA L4", "compute_capability": "8.9",
                          "free_bytes": 22 * GIB, "total_bytes": 23 * GIB}]}
+HUB = SimpleNamespace(sha=GOOD_REVISION,
+                      siblings=[SimpleNamespace(rfilename="config.json", size=1),
+                                SimpleNamespace(rfilename="model.safetensors", size=1 * GIB)])
 
 
 class FakeBackend:
-    provenance = {"artifact_sha256": "f" * 64, "model_revision": GOOD_REVISION,
-                  "gpu": {"name": "NVIDIA L4"}}
+    provenance = {"artifact_sha256": "f" * 64, "model_revision": GOOD_REVISION, "gpu": {"name": "NVIDIA L4"}}
 
     def stream(self, prompt, max_tokens):
         for index in range(max_tokens):
@@ -24,35 +33,62 @@ class FakeBackend:
         return {"cuda_peak_reserved_bytes": 1024}
 
 
-def preflight(**overrides):
-    options = {"model": "org/model", "revision": GOOD_REVISION, "min_vram_gib": 16,
-               "prompt": "hello", "smoke_tokens": 4, "load_backend": FakeBackend,
-               "sampler": lambda: _async(MEASURED), "torch_probe": lambda: TORCH_OK}
-    options.update(overrides)
-    return asyncio.run(run_preflight(**options))
-
-
 async def _async(value):
     return value
+
+
+def preflight(**overrides):
+    options = {"model": "org/model", "revision": GOOD_REVISION, "min_vram_gib": 8,
+               "prompt": "hello", "smoke_tokens": 4, "load_backend": FakeBackend,
+               "sampler": lambda: _async(measured()), "torch_probe": lambda: TORCH_OK,
+               "fetch_info": lambda model, revision: HUB, "installed_pins": PINS}
+    options.update(overrides)
+    return asyncio.run(run_preflight(**options))
 
 
 def by_name(report):
     return {item["name"]: item for item in report["checks"]}
 
 
-def test_ready_only_when_every_required_check_passes():
-    report = preflight()
+def test_ready_when_every_required_check_passes(tmp_path):
+    report = preflight(cache_dir=str(tmp_path))
     assert report["ready"] is True
-    assert all(item["status"] == "pass" for item in report["checks"])
-    assert by_name(report)["model_smoke"]["output_tokens"] == 4
-    assert by_name(report)["model_smoke"]["artifact_sha256"] == "f" * 64
+    assert report["warnings"] == []
+    checks = by_name(report)
+    assert checks["remote_revision"]["weight_bytes"] == 1 * GIB
+    assert checks["model_smoke"]["output_tokens"] == 4
+    assert checks["model_smoke"]["artifact_sha256"] == "f" * 64
 
 
-def test_a_machine_without_nvidia_is_not_ready_and_says_why():
-    report = preflight(sampler=lambda: _async({"status": "unavailable", "reason": "nvidia-smi not found",
+def test_driver_policy_follows_the_cuda_12_x_compatibility_table():
+    assert driver_check(measured("500.10"))["status"] == "fail"
+    assert driver_check(measured("525.60.13"))["status"] == "warn"
+    assert driver_check(measured("535.104.05"))["status"] == "warn"
+    assert driver_check(measured("570.25"))["status"] == "warn"
+    assert driver_check(measured("570.26"))["status"] == "pass"
+    assert driver_check(measured("580.10"))["status"] == "pass"
+    assert driver_check({"devices": []})["status"] == "fail"
+    assert driver_check(measured("unknown"))["status"] == "fail"
+
+
+def test_a_warning_driver_is_not_ready_only_because_of_the_warning(tmp_path):
+    report = preflight(cache_dir=str(tmp_path), sampler=lambda: _async(measured("535.104.05")))
+    assert report["ready"] is True
+    assert report["warnings"] == ["driver"]
+
+
+def test_a_driver_below_525_blocks_the_gate(tmp_path):
+    report = preflight(cache_dir=str(tmp_path), sampler=lambda: _async(measured("510.47")))
+    assert report["ready"] is False
+    assert by_name(report)["driver"]["status"] == "fail"
+
+
+def test_a_machine_without_nvidia_is_not_ready_and_says_why(tmp_path):
+    report = preflight(cache_dir=str(tmp_path),
+                       sampler=lambda: _async({"status": "unavailable", "reason": "nvidia-smi not found",
                                                "devices": []}),
-                       torch_probe=lambda: {"importable": True, "cuda_available": False,
-                                            "torch_version": "2.9.1", "cuda_runtime": None, "devices": []})
+                       torch_probe=lambda: {"importable": True, "cuda_available": False, "torch_version": "2.9.1",
+                                            "cuda_runtime": None, "devices": []})
     assert report["ready"] is False
     checks = by_name(report)
     assert checks["nvidia_smi_visible"]["detail"] == "nvidia-smi not found"
@@ -60,36 +96,62 @@ def test_a_machine_without_nvidia_is_not_ready_and_says_why():
     assert checks["vram"]["status"] == "fail"
 
 
-def test_vram_below_requirement_fails_the_gate():
+def test_model_fit_uses_weights_plus_headroom_not_only_the_floor(tmp_path):
     small = {**TORCH_OK, "devices": [{"index": 0, "name": "small", "compute_capability": "7.5",
-                                      "free_bytes": 6 * GIB, "total_bytes": 8 * GIB}]}
-    report = preflight(torch_probe=lambda: small)
+                                      "free_bytes": 2 * GIB, "total_bytes": 4 * GIB}]}
+    report = preflight(cache_dir=str(tmp_path), torch_probe=lambda: small, min_vram_gib=1)
     assert by_name(report)["vram"]["status"] == "fail"
+
+
+def test_unpinned_revision_is_rejected_even_when_everything_else_passes(tmp_path):
+    assert by_name(preflight(revision=None, cache_dir=str(tmp_path)))["pinned_revision"]["status"] == "fail"
+    assert by_name(preflight(revision="main", cache_dir=str(tmp_path)))["pinned_revision"]["status"] == "fail"
+
+
+def test_upstream_sha_mismatch_and_unreachable_hub_are_failures():
+    other = SimpleNamespace(sha="b" * 40, siblings=HUB.siblings)
+    result, weights = remote_revision_check("org/model", GOOD_REVISION, fetch_info=lambda m, r: other)
+    assert result["status"] == "fail" and weights is None
+
+    def unreachable(model, revision):
+        raise OSError("no route")
+    result, weights = remote_revision_check("org/model", GOOD_REVISION, fetch_info=unreachable)
+    assert result["status"] == "fail" and "OSError" in result["detail"]
+
+    empty = SimpleNamespace(sha=GOOD_REVISION, siblings=[])
+    assert remote_revision_check("org/model", GOOD_REVISION, fetch_info=lambda m, r: empty)[0]["status"] == "fail"
+
+
+def test_skipping_remote_verification_cannot_be_ready(tmp_path):
+    report = preflight(cache_dir=str(tmp_path), skip_remote=True)
     assert report["ready"] is False
+    assert by_name(report)["remote_revision"]["status"] == "fail"
 
 
-def test_unpinned_revision_is_rejected_even_when_everything_else_passes():
-    assert by_name(preflight(revision=None))["pinned_revision"]["status"] == "fail"
-    assert by_name(preflight(revision="main"))["pinned_revision"]["status"] == "fail"
-    assert preflight(revision=None)["ready"] is False
+def test_storage_must_hold_the_weights_twice_plus_margin(tmp_path):
+    from tensorpilot.gpu_preflight import storage_check
+    assert storage_check(str(tmp_path), 1024)["status"] == "pass"
+    assert storage_check(str(tmp_path), 10**15)["status"] == "fail"
 
 
-def test_smoke_failure_reports_error_type_without_message():
+def test_pins_detect_drift_from_the_lock():
+    assert pins_check(PINS)["status"] == "pass"
+    drifted = pins_check({"torch": "2.8.0", "transformers": "5.20.1"})
+    assert drifted["status"] == "fail"
+    assert "torch" in drifted["detail"] or "torch" in str(drifted)
+
+
+def test_smoke_failure_reports_error_type_without_message(tmp_path):
     class Broken(FakeBackend):
         def stream(self, prompt, max_tokens):
             raise RuntimeError("secret detail that should not be echoed")
             yield  # pragma: no cover
 
-    smoke = by_name(preflight(load_backend=Broken))["model_smoke"]
+    smoke = by_name(preflight(load_backend=Broken, cache_dir=str(tmp_path)))["model_smoke"]
     assert smoke["status"] == "fail"
     assert smoke["detail"] == "smoke inference failed: RuntimeError"
     assert "secret" not in str(smoke)
 
 
-def test_skipping_the_smoke_inference_cannot_make_the_gate_ready():
-    skipped = asyncio.run(run_preflight(
-        model="org/model", revision=GOOD_REVISION, min_vram_gib=16, prompt="hi", smoke_tokens=2,
-        load_backend=FakeBackend, sampler=lambda: _async(MEASURED), torch_probe=lambda: TORCH_OK,
-        skip_load=True))
-    assert skipped["ready"] is False
-    assert by_name(skipped)["model_smoke"]["status"] == "fail"
+def test_skipping_the_smoke_inference_cannot_make_the_gate_ready(tmp_path):
+    assert preflight(cache_dir=str(tmp_path), skip_load=True)["ready"] is False

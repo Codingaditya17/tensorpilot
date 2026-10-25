@@ -21,9 +21,12 @@ def base_config():
     return {
         "schema": gpu_bench.SCHEMA,
         "target": {"model": "tiny-local", "revision": REVISION},
-        "assumptions": {"decode_tokens_per_s": 60, "prefill_tokens_per_s": 2000},
+        "assumptions": {"status": "placeholder_unmeasured", "decode_tokens_per_s": 60,
+                        "prefill_tokens_per_s": 2000},
+        "max_session_minutes": 5,
         "experiments": [{"id": "baseline", "kind": "closed_loop", "requests": 4, "prompt_repeats": 1,
-                         "max_tokens": 4, "repeats": 1, "warmup_requests": 1, "timeout_s": 30}],
+                         "max_tokens": 4, "repeats": 1, "warmup_requests": 1, "timeout_s": 30,
+                         "max_minutes": 2}],
     }
 
 
@@ -54,6 +57,52 @@ def test_plan_reports_assumptions_and_budget_without_touching_a_gpu():
     assert summary["session_overhead_minutes"] == gpu_bench.DEFAULT_SESSION_OVERHEAD_MINUTES
     assert summary["within_budget"] is False
     assert "not measurements" in summary["note"]
+
+
+def test_measured_or_missing_assumption_status_is_rejected():
+    config = base_config()
+    config["assumptions"]["status"] = "measured"
+    with pytest.raises(ValueError, match="placeholder_unmeasured"):
+        gpu_bench.validate_config(config)
+    config = base_config()
+    del config["experiments"][0]["max_minutes"]
+    with pytest.raises(ValueError, match="max_minutes"):
+        gpu_bench.validate_config(config)
+
+
+def test_run_requires_a_session_budget(tmp_path):
+    config = base_config()
+    del config["max_session_minutes"]
+    with pytest.raises(ValueError, match="session budget"):
+        gpu_bench.run(config, url="http://127.0.0.1:1", output_dir=tmp_path / "budget")
+
+
+def test_abort_rules_stop_on_error_rate_oom_and_unready_worker():
+    def report(error_rate=0.0, oom_before=0, oom_after=0, ready=True):
+        return {"summary": {"error_rate": error_rate},
+                "metadata": {"server": {"last_measured_memory": {"cuda_oom_events": oom_before}},
+                             "server_after": {"ready": ready,
+                                              "last_measured_memory": {"cuda_oom_events": oom_after}}}}
+    assert gpu_bench._abort_reason(report(), .05) is None
+    assert gpu_bench._abort_reason(report(error_rate=.2), .05).startswith("error_rate")
+    assert gpu_bench._abort_reason(report(oom_before=0, oom_after=1), .05) == "cuda_out_of_memory"
+    assert gpu_bench._abort_reason(report(ready=False), .05) == "worker_not_ready_after_run"
+
+
+def test_time_cap_and_session_budget_are_enforced_without_a_server(tmp_path, monkeypatch):
+    async def slow_run(args):
+        await asyncio.sleep(10)
+
+    monkeypatch.setattr(gpu_bench.load, "run", slow_run)
+    config = base_config()
+    config["experiments"][0]["warmup_requests"] = 0
+    config["experiments"].append({**config["experiments"][0], "id": "second"})
+    manifest = gpu_bench.run(config, url="http://127.0.0.1:1", output_dir=tmp_path / "capped",
+                             session_minutes=0.0005)
+    first = manifest["experiments"]["baseline"]
+    assert first["status"] == "aborted" and first["abort_reason"] == "time_cap"
+    second = manifest["experiments"]["second"]
+    assert second["status"] == "skipped" and second["abort_reason"] == "session_budget"
 
 
 def test_run_refuses_unpinned_revision_and_planned_experiments(tmp_path):
@@ -103,7 +152,7 @@ def test_run_writes_one_report_per_repeat_with_server_provenance(tmp_path):
     config = base_config()
     config["experiments"].append({"id": "paced", "kind": "open_loop", "requests": 3, "prompt_repeats": 1,
                                   "max_tokens": 3, "rates": [50.0], "repeats": 1, "warmup_requests": 0,
-                                  "concurrency": 4, "timeout_s": 30})
+                                  "concurrency": 4, "timeout_s": 30, "max_minutes": 2})
     with ThreadedWorker(model_dir) as worker:
         manifest = gpu_bench.run(config, url=worker.url, output_dir=tmp_path / "evidence",
                                  config_path="inline.json")
@@ -124,3 +173,16 @@ def test_run_writes_one_report_per_repeat_with_server_provenance(tmp_path):
     assert (evidence / "baseline" / "repeat01_closed.requests.jsonl").exists()
     with pytest.raises(FileExistsError):
         gpu_bench.run(config, url="http://127.0.0.1:1", output_dir=evidence)
+
+
+def test_shipped_benchmark_configs_validate_and_keep_placeholders_labeled():
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1] / "benchmarks" / "gpu"
+    configs = sorted(root.glob("*.json"))
+    assert {path.name for path in configs} >= {"v09-first-30min.json", "v09-single-gpu.json",
+                                              "v09-two-gpu-future.json"}
+    for path in configs:
+        config = gpu_bench.load_config(path)
+        assert config["assumptions"]["status"] == "placeholder_unmeasured", path.name
+        summary = gpu_bench.plan(config)
+        assert summary["assumptions_status"] == "placeholder_unmeasured"

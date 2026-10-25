@@ -1,0 +1,65 @@
+{
+  "schema": "tensorpilot.gpu-experiments/v1",
+  "suite": "v0.9-first-30-minutes",
+  "target": {
+    "model": "Qwen/Qwen2.5-0.5B-Instruct",
+    "revision": "7ae557604adf67be50417f59c2c2f167def9a775",
+    "license": "Apache-2.0",
+    "prompt_format": "raw text, tokenizer default special tokens (no chat template)"
+  },
+  "assumptions": {
+    "status": "placeholder_unmeasured",
+    "decode_tokens_per_s": 60,
+    "prefill_tokens_per_s": 2000,
+    "note": "Placeholders. This run is the measurement that replaces them."
+  },
+  "max_session_minutes": 30,
+  "session_overhead_minutes": 10,
+  "experiments": [
+    {
+      "id": "first-closed-c1",
+      "kind": "closed_loop",
+      "description": "Eight sequential requests: correctness and first latency numbers.",
+      "requests": 8,
+      "concurrency": 1,
+      "prompt_repeats": 2,
+      "max_tokens": 32,
+      "repeats": 1,
+      "warmup_requests": 2,
+      "timeout_s": 60,
+      "max_minutes": 8,
+      "abort_error_rate": 0.0
+    },
+    {
+      "id": "first-length-medium",
+      "kind": "length_matrix",
+      "description": "Medium context and output, four requests.",
+      "requests": 4,
+      "concurrency": 1,
+      "prompt_repeats": 8,
+      "max_tokens": 128,
+      "repeats": 1,
+      "warmup_requests": 1,
+      "timeout_s": 90,
+      "max_minutes": 8,
+      "abort_error_rate": 0.0
+    },
+    {
+      "id": "first-open-rate",
+      "kind": "open_loop",
+      "description": "Eight paced requests at 0.5 per second.",
+      "requests": 8,
+      "concurrency": 4,
+      "prompt_repeats": 2,
+      "max_tokens": 32,
+      "rates": [
+        0.5
+      ],
+      "repeats": 1,
+      "warmup_requests": 0,
+      "timeout_s": 60,
+      "max_minutes": 8,
+      "abort_error_rate": 0.0
+    }
+  ]
+}

@@ -58,6 +58,8 @@ class CUDABackend:
         self.model = AutoModelForCausalLM.from_pretrained(path, dtype=getattr(torch, dtype))
         self.model = self.model.to(self.device).eval()
         self.eos_token_ids = _eos_token_ids(self.model, self.tokenizer)
+        context = getattr(self.model.config, "max_position_embeddings", None)
+        self.context_tokens = int(context) if isinstance(context, int) and context > 0 else None
         gpu = cuda_device_summary(torch, self.device) if self.device.type == "cuda" else None
         self.provenance.update({
             "backend": self.backend_name, "device": str(self.device), "gpu": gpu,
@@ -65,6 +67,8 @@ class CUDABackend:
             "cuda_runtime": torch.version.cuda, "cudnn_version": torch.backends.cudnn.version(),
             "torch_version": torch.__version__, "transformers_version": transformers.__version__,
             "decoding": "greedy, explicit KV cache, one sequence per backend",
+            # Checkpoint sampling defaults (for example repetition penalty) are not applied.
+            "generation_config_applied": False, "context_tokens": self.context_tokens,
         })
 
     def stream(self, prompt, max_tokens):
@@ -72,28 +76,41 @@ class CUDABackend:
         ids = self.tokenizer.encode(prompt)
         if not 1 <= len(ids) <= self.max_prompt_tokens:
             raise ValueError("prompt exceeds token limit or encodes empty")
+        if self.context_tokens is not None and len(ids) + max_tokens > self.context_tokens:
+            # Reject before the first forward pass rather than failing partway through a stream.
+            raise ValueError("prompt plus max_tokens exceeds the model context window")
         generated, emitted = [], ""
-        with torch.inference_mode():
-            outputs = self._forward(torch.tensor([ids], device=self.device), None)
-            past, logits = outputs.past_key_values, outputs.logits[:, -1, :]
-            for step in range(max_tokens):
-                token_id = int(torch.argmax(logits, dim=-1).item())
-                is_eos = token_id in self.eos_token_ids
-                last = is_eos or step == max_tokens - 1
-                finish = ("stop" if is_eos else "length") if last else None
-                if not is_eos:
-                    generated.append(token_id)
-                # EOS is yielded for protocol completeness but never counted as output.
-                text, emitted = self._text_delta(generated, emitted, final=last)
-                yield Token(text, token_id, not is_eos, len(ids), finish)
-                if last:
-                    return
-                outputs = self._forward(torch.tensor([[token_id]], device=self.device), past)
-                past, logits = outputs.past_key_values, outputs.logits[:, -1, :]
-
-    def _forward(self, input_ids, past):
+        outputs = past = None
         try:
-            return self.model(input_ids=input_ids, past_key_values=past, use_cache=True)
+            with torch.inference_mode():
+                # One unpadded sequence: the mask is all ones and grows by one per decoded token.
+                mask = torch.ones((1, len(ids)), dtype=torch.long, device=self.device)
+                outputs = self._forward(torch.tensor([ids], device=self.device), mask, None)
+                past, logits = outputs.past_key_values, outputs.logits[:, -1, :]
+                for step in range(max_tokens):
+                    token_id = int(torch.argmax(logits, dim=-1).item())
+                    is_eos = token_id in self.eos_token_ids
+                    last = is_eos or step == max_tokens - 1
+                    finish = ("stop" if is_eos else "length") if last else None
+                    if not is_eos:
+                        generated.append(token_id)
+                    # EOS is yielded for protocol completeness but never counted as output.
+                    text, emitted = self._text_delta(generated, emitted, final=last)
+                    yield Token(text, token_id, not is_eos, len(ids), finish)
+                    if last:
+                        return
+                    mask = torch.cat([mask, torch.ones((1, 1), dtype=torch.long, device=self.device)], dim=1)
+                    outputs = self._forward(torch.tensor([[token_id]], device=self.device), mask, past)
+                    past, logits = outputs.past_key_values, outputs.logits[:, -1, :]
+        finally:
+            # Runs on normal completion, error, deadline and generator close. Drop the cache
+            # references so the caching allocator can reuse the memory for the next request.
+            outputs = past = logits = None
+
+    def _forward(self, input_ids, attention_mask, past):
+        try:
+            return self.model(input_ids=input_ids, attention_mask=attention_mask,
+                              past_key_values=past, use_cache=True)
         except self.torch.OutOfMemoryError:
             # The request fails with a bounded error; the worker stays up for the next one.
             self.oom_events += 1

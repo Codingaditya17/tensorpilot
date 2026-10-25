@@ -168,3 +168,35 @@ def test_engine_cancels_real_decode_releases_reservation_and_recovers(model_dir)
         finally:
             await engine.close()
     asyncio.run(scenario())
+
+
+def test_prompt_plus_output_beyond_context_is_rejected_before_inference(model_dir):
+    backend = make_backend(model_dir)
+    assert backend.context_tokens == 256
+    with pytest.raises(ValueError, match="context window"):
+        next(backend.stream(PROMPT, 256))
+    assert backend.oom_events == 0
+    assert len(list(backend.stream(PROMPT, 4))) == 4
+
+
+def test_closing_a_stream_releases_cache_references(model_dir):
+    import gc
+    import weakref
+
+    backend = make_backend(model_dir)
+    refs = []
+    real_forward = backend.model.forward
+
+    def recording(**kwargs):
+        output = real_forward(**kwargs)
+        refs.append(weakref.ref(output.past_key_values))
+        return output
+
+    backend.model.forward = recording
+    stream = backend.stream(PROMPT, 8)
+    next(stream)
+    next(stream)
+    stream.close()
+    gc.collect()
+    assert refs and all(ref() is None for ref in refs)
+    del backend.model.forward

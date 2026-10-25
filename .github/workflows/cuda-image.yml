@@ -1,0 +1,58 @@
+# Builds the Linux/CUDA image on a CPU-only runner and runs the CUDA-interface tests inside it.
+# No GPU is used or claimed. Manual dispatch only: pushing a branch does not start this job.
+name: CUDA image (CPU validation)
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build-and-validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint Dockerfile
+        run: docker run --rm -i hadolint/hadolint:latest-debian < deploy/docker/Dockerfile.cuda
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build linux/amd64 image (not pushed)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile.cuda
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: tensorpilot-cuda:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Container identity and entrypoints
+        run: |
+          uid="$(docker run --rm --entrypoint id tensorpilot-cuda:ci -u)"
+          test "$uid" = "10001"
+          docker run --rm --entrypoint python tensorpilot-cuda:ci -c "import tensorpilot.cuda_backend, tensorpilot.readiness; import torch, transformers; print('torch', torch.__version__, 'transformers', transformers.__version__)"
+          docker run --rm --entrypoint tensorpilot-server tensorpilot-cuda:ci --help > /dev/null
+
+      - name: CUDA-interface tests on CPU inside the image
+        run: |
+          docker run --rm -v "$PWD/tests:/tests:ro" -v "$PWD/benchmarks:/benchmarks:ro" --entrypoint bash tensorpilot-cuda:ci -c '
+            python -m pip install -q "pytest>=8,<10" &&
+            cd /tmp &&
+            python -m pytest -q -p no:cacheprovider \
+              /tests/test_cuda_backend.py /tests/test_cuda_cluster.py /tests/test_graceful_shutdown.py \
+              /tests/test_gpu_bench.py /tests/test_gpu_preflight.py /tests/test_gpu_telemetry.py \
+              /tests/test_server_cli.py /tests/test_backend_contract.py /tests/test_readiness.py'
+
+      - name: Preflight must refuse a runner without a GPU
+        run: |
+          set +e
+          docker run --rm -e TENSORPILOT_API_KEY=ci-not-used --entrypoint tensorpilot-gpu-preflight \
+            tensorpilot-cuda:ci --model Qwen/Qwen2.5-0.5B-Instruct \
+            --revision 7ae557604adf67be50417f59c2c2f167def9a775 --skip-remote --skip-load \
+            --output /tmp/preflight.json
+          rc=$?
+          set -e
+          test "$rc" = "1"

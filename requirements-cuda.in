@@ -1,5 +1,5 @@
 # Direct dependencies of the Linux/NVIDIA worker. Regenerate requirements-cuda.txt with:
-#   uv pip compile requirements-cuda.in --python-platform x86_64-unknown-linux-gnu --python-version 3.11 -o requirements-cuda.txt
+#   uv pip compile requirements-cuda.in --python-platform x86_64-unknown-linux-gnu --python-version 3.11 --generate-hashes -o requirements-cuda.txt
 torch==2.9.1
 transformers==5.20.1
 tokenizers

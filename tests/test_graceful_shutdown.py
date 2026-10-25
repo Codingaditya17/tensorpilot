@@ -59,7 +59,7 @@ def test_sigterm_during_decode_drains_and_exits_cleanly(tmp_path):
     try:
         wait_ready(url, process)
         request = urllib.request.Request(url + "/v1/generate", method="POST",
-                                         data=json.dumps({"prompt": "hello world the", "max_tokens": 512}).encode(),
+                                         data=json.dumps({"prompt": "hello world the", "max_tokens": 200}).encode(),
                                          headers={"Content-Type": "application/json"})
         response = urllib.request.urlopen(request, timeout=60)
         first = json.loads(response.readline())

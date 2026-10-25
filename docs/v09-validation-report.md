@@ -124,12 +124,14 @@ the worker exactly once, so no replay occurred.
   `[N/A]` pattern on consumer GPUs.
 - Throughput, TTFT, inter-token latency and P50/P95/P99 on a GPU. Every value in this
   repository is either a CPU test result or a planning estimate.
-- The Dockerfile build, the container NVIDIA runtime, the healthcheck under Docker,
-  and the compose stack with a GPU reservation.
+- The container NVIDIA runtime, the healthcheck against a loaded model, and the compose
+  stack with a GPU reservation. (The image itself builds and passes its CPU tests; see
+  docs/v09-cuda-runtime.md.)
 - The Runpod session script end to end. Only its `--plan` mode was exercised here.
 - The CI job `cuda-backend-cpu` in `.github/workflows/tests.yml`. It was not run on
   GitHub, and its CPU PyTorch index has not been checked from CI.
-- Multi-GPU behavior. It is not claimed. The two-GPU experiment refuses to run.
+- Multi-GPU behavior. It is not claimed. `deploy/runpod/two_gpu_session.sh` is prepared and
+  checked only in `--plan` mode; see docs/v09-two-gpu-experiment.md.
 - Batched CUDA execution. It is not implemented, and batch-width experiments are
   listed as planned.
 

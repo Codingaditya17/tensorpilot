@@ -4,7 +4,8 @@
 # for full support; the NVIDIA container runtime injects the driver libraries).
 # The CUDA runtime is supplied by the PyTorch wheels pinned in requirements-cuda.txt, so
 # the image needs no CUDA toolkit. See docs/v09-cuda-runtime.md for the full assumptions.
-FROM python:3.11-slim-bookworm
+# Base pinned by digest (python:3.11-slim-bookworm, resolved 2026-10-20). Update deliberately.
+FROM python:3.11-slim-bookworm@sha256:0a310eeecf4e1f5a0743f9a6520c90c88d089c903ca5fd283f501e3a805f5f89
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -26,7 +27,7 @@ RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin tensorpilot \
 
 WORKDIR /app
 COPY requirements-cuda.txt ./
-RUN python -m pip install -r requirements-cuda.txt
+RUN python -m pip install --require-hashes -r requirements-cuda.txt
 
 COPY pyproject.toml README.md ./
 COPY tensorpilot ./tensorpilot
@@ -39,7 +40,7 @@ EXPOSE 8080
 
 # Readiness, not liveness: the worker is ready only after the model is loaded and warmed.
 HEALTHCHECK --interval=15s --timeout=5s --start-period=300s --retries=4 \
-  CMD python -c "import os, sys, urllib.request; url = 'http://127.0.0.1:%s/readyz' % os.environ.get('TENSORPILOT_PORT', '8080'); sys.exit(0 if urllib.request.urlopen(url, timeout=3).status == 200 else 1)"
+  CMD ["python", "-m", "tensorpilot.readiness"]
 
 # Run in the foreground as PID 1. The server handles SIGTERM as graceful shutdown: it cancels
 # active decode, drains the queue and releases the model. Use `docker run --init` or compose

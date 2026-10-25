@@ -75,6 +75,17 @@ runtimes are comparable on the same prompts.
   back until its remaining bytes arrive, so no replacement characters are streamed.
 - Prompts longer than `--max-prompt-tokens` are rejected before inference as
   `invalid_prompt`.
+- Prompt plus `max_tokens` must fit the model's context window
+  (`max_position_embeddings`). A request that does not fit is rejected before the first
+  forward pass, instead of failing partway through a stream.
+- Each step passes an explicit attention mask that grows by one token, so the
+  attention pattern is defined even though this path never pads.
+- Closing a stream, whether by completion, error, deadline or cancellation, drops the
+  KV-cache references in a `finally` block, so the caching allocator can reuse the
+  memory immediately.
+- The checkpoint's `generation_config` sampling defaults (such as the repetition
+  penalty in instruction-tuned checkpoints) are **not** applied. Provenance records
+  `generation_config_applied: false`, so results are comparable to the greedy MLX path.
 
 ## Decision 4: memory safeguards that fail per request
 
@@ -193,18 +204,37 @@ below.
 
 ## Driver and runtime assumptions
 
-These are assumptions to confirm on the Pod, not verified facts:
+Verified against NVIDIA's CUDA documentation (release notes for 12.8 and the minor
+version compatibility guide):
 
-- The host NVIDIA driver must support CUDA 12.8 (the R570 driver branch, 570.26 or
-  newer, per NVIDIA's CUDA 12.8 release notes). `nvidia-smi` on the host reports the
-  driver version, and `tensorpilot.gpu_preflight` confirms that PyTorch can
-  initialize CUDA.
+- CUDA 12.8 GA lists **Linux driver 570.26 or newer** as the toolkit driver.
+- CUDA 12.x **minor version compatibility** runs on drivers from **525 up to 580**.
+  Some features may return `cudaErrorCallRequiresNewerDriver` on older drivers, and
+  PTX-compiled code needs the newer driver. NVIDIA recommends the same toolkit minor
+  version or later when these limitations matter.
+
+The preflight therefore uses this policy, rather than rejecting every driver below
+570.26:
+
+| driver | preflight result |
+|---|---|
+| below 525 | fail: outside CUDA 12.x compatibility |
+| 525 to 570.25 | warn: compatibility range; the smoke test must pass |
+| 570.26 or newer | pass: meets the CUDA 12.8 toolkit requirement |
+
+Whatever the version number, the gate decides on actual behavior: PyTorch must
+initialize CUDA, the revision and weights must be present, the dependency pins must
+match, and the smoke inference must produce tokens.
+
+Other assumptions, still to confirm on the Pod:
+
 - The container needs `NVIDIA_VISIBLE_DEVICES=all` and
   `NVIDIA_DRIVER_CAPABILITIES=compute,utility`, both set in the image.
-- The device needs compute capability 7.0 or newer for float16 and 8.0 or newer for
-  bfloat16. The preflight records the capability, and the operator chooses the dtype.
-- A 16 GiB device is the preflight default minimum. The 0.5B reference model needs far
-  less. The threshold is conservative and deliberately adjustable.
+- Compute capability 7.0 or newer for float16; 8.0 or newer for bfloat16. The preflight
+  records the capability, and the operator chooses the dtype.
+- VRAM: the preflight requires the free device memory to cover the downloaded weights
+  plus 1.5 GiB of headroom, and never less than the `--min-vram-gib` floor (default 8).
+  The reference model's weights are about 1 GB in bfloat16.
 
 ## What is verified where
 
@@ -232,6 +262,11 @@ These are assumptions to confirm on the Pod, not verified facts:
   driver samples. They are not an audit of total device pressure.
 - Two-GPU and batch-width experiments are listed as planned and refuse to run. They
   are not claimed.
-- The Dockerfile has not been built on this machine. The Docker daemon started, but
-  registry access hung, so the image is validated only by compose-config and review.
-  Build it on a host with registry access before the Pod run.
+- The image was built for linux/amd64 on a Mac under emulation (4.25 GB) and its CUDA-interface
+  tests pass inside it (63 passed, CPU only). Its GPU path has never run: the NVIDIA container
+  runtime, driver compatibility and the healthcheck against a loaded model are unverified.
+- Without a GPU the server does not stay up reporting "not ready". It fails fast: the backend
+  raises "PyTorch cannot see a CUDA device", the process exits 1, and the healthcheck
+  (`python -m tensorpilot.readiness`) exits 1. This is deliberate so a broken Pod shows as failed
+  instead of idling while billed. `tensorpilot-gpu-preflight` is the tool that reports GPU
+  readiness without starting a server (exit 1, `ready: false`).
