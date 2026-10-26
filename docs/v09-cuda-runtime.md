@@ -7,7 +7,7 @@ anywhere in this release. The measured CUDA results come from the GPU session in
 [`v09-runpod-runbook.md`](v09-runpod-runbook.md).
 
 
-> **Superseded in part by v1.0 (not yet GPU-verified):** the CUDA backend is no longer serial-only; see [v10-architecture.md](v10-architecture.md). The limitations below describe v0.9.
+> **Update:** a first RTX 4090 run later exercised this code (see `benchmarks/baselines/v0.9.1-4-rtx4090`). The CUDA backend is no longer serial-only in v1.0, which is **not yet GPU-verified**: see [v10-architecture.md](v10-architecture.md). The limitations below describe v0.9.
 
 ## Goal and non-goals
 
