@@ -55,6 +55,8 @@ def summarize(records, wall_s, slo=None):
                    for value in record["server"].get("inter_token_latency_s", [])]
     client_itl = [value for record in completed for value in record.get("client_inter_token_s", [])]
     ttfts = [r["client_ttft_s"] for r in completed if r["client_ttft_s"] is not None]
+    # Only TensorPilot reports queue wait; an OpenAI-compatible server does not.
+    queue_waits = [r["server"]["queue_wait_s"] for r in completed if r["server"].get("queue_wait_s") is not None]
     phase_profiles = [record["server"].get("phase_profile", {}) for record in completed]
     # Active window: first token produced to last token produced, across all completed requests. Unlike
     # wall time it excludes ramp-up (queue fill) and the drain tail, so it approximates steady throughput.
@@ -84,8 +86,8 @@ def summarize(records, wall_s, slo=None):
         **{f"p{p}_client_tpot_s": percentile([v for v in map(_mean_itl, completed) if v is not None], p / 100)
            for p in (50, 95, 99)},
         **{f"p{p}_client_inter_token_s": percentile(client_itl, p / 100) for p in (50, 95, 99)},
-        "p95_queue_wait_s": percentile([r["server"]["queue_wait_s"] for r in completed], .95),
-        "p99_queue_wait_s": percentile([r["server"]["queue_wait_s"] for r in completed], .99),
+        "p95_queue_wait_s": percentile(queue_waits, .95),
+        "p99_queue_wait_s": percentile(queue_waits, .99),
         "p95_inter_token_latency_s": percentile(inter_token, .95),
         "median_request_observed_prefill_execution_s": percentile(
             [profile["prefill_execution_s"] for profile in phase_profiles
@@ -93,7 +95,7 @@ def summarize(records, wall_s, slo=None):
         "median_request_observed_decode_execution_s": percentile(
             [profile["decode_execution_s"] for profile in phase_profiles
              if profile.get("decode_execution_s") is not None], .5),
-        "max_queue_wait_s": max((r["server"]["queue_wait_s"] for r in completed), default=None),
+        "max_queue_wait_s": max(queue_waits, default=None),
         "p95_dispatch_lag_s": percentile([r.get("dispatch_lag_s", 0) for r in records], .95),
         "partial_output_tokens_on_failure": sum(r.get("received_output_tokens", 0)
                                                  for r in counted if not r["ok"]),
@@ -207,6 +209,10 @@ async def request_one(session, url, index, args, scheduled, experiment_start, it
             record["error_code"] = ("transport_error" if isinstance(exc, (aiohttp.ClientError, TimeoutError))
                                     else "invalid_stream")
             record["client_timeout"] = isinstance(exc, TimeoutError)
+    return _finish_record(record, timeout_s, started)
+
+
+def _finish_record(record, timeout_s, started):
     record["client_elapsed_s"] = time.perf_counter() - started
     times = record["client_token_times_s"]
     record["client_inter_token_s"] = [b - a for a, b in zip(times, times[1:])]
@@ -228,6 +234,100 @@ async def request_one(session, url, index, args, scheduled, experiment_start, it
     else:
         record["outcome"] = "failed"
     return record
+
+
+OPENAI_SAMPLING = {"temperature": 0, "top_p": 1.0, "top_k": -1, "repetition_penalty": 1.0}
+
+
+def _openai_error(record, status, text):
+    record["http_status"] = status
+    record["error"] = text[:500]
+    try:
+        body = json.loads(text)["error"]
+        record["error_code"] = str(body.get("code") or body.get("type") or "http_error")
+    except (ValueError, KeyError, TypeError, AttributeError):
+        record["error_code"] = "http_error"
+    if status == 503 or record["error_code"] in ("overloaded", "server_busy"):
+        record["error_code"] = "overloaded"
+
+
+async def request_openai(session, url, index, args, scheduled, experiment_start, item):
+    """The same request against an OpenAI-compatible server (vLLM), producing the same record shape.
+
+    Sampling is pinned to greedy and every sampling override is explicit: vLLM otherwise applies the model
+    repository's generation_config.json (Qwen2.5-Instruct ships repetition_penalty 1.05, top_k 20, top_p 0.8),
+    which would make the two engines generate different text. Token arrivals are SSE chunks that carry text;
+    the generated-token count is the server's own usage figure.
+    """
+    started = time.perf_counter()
+    record = {"index": index, "ok": False, "prompt": item["prompt"], "class": item["class"],
+              "max_tokens": item["max_tokens"], "scheduled_offset_s": scheduled - experiment_start,
+              "dispatch_offset_s": started - experiment_start, "dispatch_lag_s": max(0, started - scheduled),
+              "client_ttft_s": None, "client_token_times_s": [], "received_output_tokens": 0}
+    for field in ("prompt_tokens", "cancel_after_tokens", "cancel_after_s"):
+        if field in item:
+            record[field] = item[field]
+    timeout_s = item.get("timeout_s", args.timeout)
+    cancel_tokens, cancel_s = item.get("cancel_after_tokens"), item.get("cancel_after_s")
+    body = {"model": args.model_name, "prompt": item["prompt"], "max_tokens": item["max_tokens"], "stream": True,
+            "stream_options": {"include_usage": True}, **OPENAI_SAMPLING}
+    usage, finish, done, scope = None, None, False, None
+    try:
+        async with asyncio.timeout(cancel_s) as scope:
+            async with session.post(url + "/v1/completions", json=body,
+                                    timeout=aiohttp.ClientTimeout(total=timeout_s + 5)) as response:
+                record["http_status"] = response.status
+                record["request_id"] = response.headers.get("X-Request-ID")
+                if response.status != 200:
+                    _openai_error(record, response.status, await response.text())
+                else:
+                    async for raw in response.content:
+                        line = raw.decode("utf-8", "replace").strip()
+                        if not line.startswith("data:"):
+                            continue
+                        payload = line[5:].strip()
+                        if payload == "[DONE]":
+                            done = True
+                            break
+                        event = json.loads(payload)
+                        if event.get("error"):
+                            record["error"] = str(event["error"])[:500]
+                            record["error_code"] = "inference_error"
+                            break
+                        if event.get("usage"):
+                            usage = event["usage"]
+                        for choice in event.get("choices") or []:
+                            if choice.get("finish_reason"):
+                                finish = choice["finish_reason"]
+                            if choice.get("text"):
+                                elapsed = time.perf_counter() - started
+                                if record["client_ttft_s"] is None:
+                                    record["client_ttft_s"] = elapsed
+                                record["client_token_times_s"].append(elapsed)
+                                record["received_output_tokens"] += 1
+                                if cancel_tokens and record["received_output_tokens"] >= cancel_tokens:
+                                    record["cancelled"] = True
+                                    break
+                        if record.get("cancelled"):
+                            break
+                    if not record.get("cancelled") and "error" not in record:
+                        if done and finish and usage:
+                            record["ok"] = True
+                            record["server"] = {"generated_tokens": usage["completion_tokens"],
+                                                "prompt_tokens": usage.get("prompt_tokens"), "finish_reason": finish,
+                                                "queue_wait_s": None, "api": "openai"}
+                        else:
+                            record["error"] = "stream ended without finish, usage and [DONE]"
+                            record["error_code"] = "incomplete_stream"
+    except (aiohttp.ClientError, TimeoutError, ValueError, KeyError, TypeError) as exc:
+        if isinstance(exc, TimeoutError) and scope is not None and scope.expired():
+            record["cancelled"] = True
+        else:
+            record["error"] = repr(exc)
+            record["error_code"] = ("transport_error" if isinstance(exc, (aiohttp.ClientError, TimeoutError))
+                                    else "invalid_stream")
+            record["client_timeout"] = isinstance(exc, TimeoutError)
+    return _finish_record(record, timeout_s, started)
 
 
 def arrival_offsets(args, count):
@@ -268,6 +368,10 @@ def validate_config(args):
         raise ValueError("requests exceeds the configured max_requests safety cap")
     if getattr(args, "compact", False) and not getattr(args, "journal", None):
         raise ValueError("compact reports require a raw request journal")
+    if getattr(args, "api", "tensorpilot") not in ("tensorpilot", "openai"):
+        raise ValueError("api must be tensorpilot or openai")
+    if getattr(args, "api", "tensorpilot") == "openai" and not getattr(args, "model_name", None):
+        raise ValueError("--model-name is required with --api openai")
     if getattr(args, "arrival", "uniform") not in ("uniform", "poisson", "burst"):
         raise ValueError("arrival must be uniform, poisson or burst")
     if getattr(args, "arrival", "uniform") != "uniform" and not args.rate:
@@ -280,6 +384,20 @@ def validate_config(args):
             raise ValueError("slo must be an object with ttft_s, e2e_s and/or tpot_s")
         if not all(type(v) in (int, float) and math.isfinite(v) and v > 0 for v in slo.values()):
             raise ValueError("slo thresholds must be positive finite numbers")
+
+
+async def _server_state(session, url, api):
+    """TensorPilot's /health, or for an OpenAI-compatible server its model list (it has no health document)."""
+    timeout = aiohttp.ClientTimeout(total=10)
+    if api != "openai":
+        async with session.get(url + "/health", timeout=timeout) as response:
+            response.raise_for_status()
+            return await response.json()
+    async with session.get(url + "/v1/models", timeout=timeout) as response:
+        response.raise_for_status()
+        models = (await response.json()).get("data") or []
+    return {"ready": bool(models), "api": "openai", "service": "openai-compatible",
+            "models": [{"id": m.get("id"), "max_model_len": m.get("max_model_len")} for m in models]}
 
 
 async def run(args):
@@ -297,17 +415,17 @@ async def run(args):
                                               kind=getattr(args, "workload", "uniform"),
                                               seed=getattr(args, "seed", 42)))
     url = args.url.rstrip("/")
+    api = getattr(args, "api", "tensorpilot")
+    request_client = request_openai if api == "openai" else request_one
     # No keep-alive: the server force-closes a connection when a request hits its deadline, and a pooled
     # connection reused right after would fail the next, unrelated request. Each request pays one loopback connect.
     connector = aiohttp.TCPConnector(limit=args.concurrency, force_close=True)
     api_key = os.environ.get("TENSORPILOT_API_KEY")
     headers = {"Authorization": "Bearer " + api_key} if api_key else {}
     async with aiohttp.ClientSession(connector=connector, headers=headers) as session:
-        async with session.get(url + "/health", timeout=aiohttp.ClientTimeout(total=10)) as response:
-            response.raise_for_status()
-            server = await response.json()
-            if not server.get("ready"):
-                raise RuntimeError("server is not ready")
+        server = await _server_state(session, url, api)
+        if not server.get("ready"):
+            raise RuntimeError("server is not ready")
         duration = getattr(args, "duration_s", None)
         limit = args.requests if duration is None else getattr(args, "max_requests", 10000)
         metadata = {"run_id": uuid.uuid4().hex, "run_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -343,7 +461,7 @@ async def run(args):
                 await asyncio.sleep(max(0, scheduled - time.perf_counter()))
                 if time.perf_counter() >= stop_at:
                     return
-                record = await request_one(session, url, index, args, scheduled, start, plan[index % len(plan)])
+                record = await request_client(session, url, index, args, scheduled, start, plan[index % len(plan)])
                 if journal:
                     journal.record(record)
                 if getattr(args, "compact", False):
@@ -371,9 +489,7 @@ async def run(args):
         metadata["stop_reason"] = ("request_count_completed" if duration is None else
                                    "request_cap_reached" if len(records) >= limit else "duration_elapsed")
         try:
-            async with session.get(url + "/health", timeout=aiohttp.ClientTimeout(total=10)) as response:
-                response.raise_for_status()
-                metadata["server_after"] = await response.json()
+            metadata["server_after"] = await _server_state(session, url, api)
         except (aiohttp.ClientError, TimeoutError, ValueError):
             metadata["server_after"] = None
     metadata["runtime_profile_delta"] = runtime_profile_delta(
@@ -397,6 +513,9 @@ def main():
     parser.add_argument("--output", default=f"results/load_{stamp}_{uuid.uuid4().hex[:6]}.json")
     parser.add_argument("--workload", choices=("uniform", "mixed"), default="uniform")
     parser.add_argument("--workload-file", help="validated JSON plan; --requests must match its length")
+    parser.add_argument("--api", choices=("tensorpilot", "openai"), default="tensorpilot",
+                        help="openai drives an OpenAI-compatible server (vLLM) with the same workload and metrics")
+    parser.add_argument("--model-name", help="model id sent to an OpenAI-compatible server")
     parser.add_argument("--workload-spec", help="declarative workload spec (JSON); builds --requests items")
     parser.add_argument("--arrival", choices=("uniform", "poisson", "burst"), default="uniform",
                         help="open-loop arrival process when --rate is nonzero")

@@ -192,3 +192,67 @@ def test_counter_parsing_and_deltas():
 def test_statistics_caveat_distinguishes_small_and_larger_samples():
     assert "small sample" in gpu_bench.statistics_caveat({"successful_requests": 20})
     assert "small sample" not in gpu_bench.statistics_caveat({"successful_requests": 500})
+
+
+# ----- the vLLM-side stage: the same harness against an OpenAI-compatible server ---------------------------
+
+class OpenAIServer:
+    def __init__(self):
+        from test_load_openai import FakeVLLM
+        self.fake = FakeVLLM(chunks=6, delay=0.002)
+        self.loop = asyncio.new_event_loop()
+        self.thread = threading.Thread(target=self.loop.run_forever, daemon=True)
+
+    def __enter__(self):
+        self.thread.start()
+        self.runner = web.AppRunner(self.fake.app, access_log=None)
+        asyncio.run_coroutine_threadsafe(self.runner.setup(), self.loop).result(30)
+        site = web.TCPSite(self.runner, "127.0.0.1", 0)
+        asyncio.run_coroutine_threadsafe(site.start(), self.loop).result(30)
+        self.url = f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"
+        return self
+
+    def __exit__(self, *exc_info):
+        asyncio.run_coroutine_threadsafe(self.runner.cleanup(), self.loop).result(30)
+        self.loop.call_soon_threadsafe(self.loop.stop)
+        self.thread.join(10)
+
+
+def openai_config():
+    cfg = config()
+    cfg["api"], cfg["model_name"] = "openai", "Qwen/Qwen2.5-7B-Instruct"
+    cfg["experiments"] = [cfg["experiments"][0]]
+    cfg["experiments"][0]["workload_spec"] = {"seed": 1, "classes": [{"name": "s", "prompt_tokens": 6,
+                                                                       "output_tokens": 6}]}
+    return cfg
+
+
+def test_the_same_harness_runs_an_openai_compatible_stage_with_its_own_limitations(tmp_path):
+    with OpenAIServer() as server:
+        manifest = gpu_bench.run(openai_config(), url=server.url, output_dir=tmp_path / "vllm", config_path="inline.json")
+    directory = tmp_path / "vllm"
+    assert manifest["api"] == "openai" and manifest["experiments"]["sweep-c4"]["status"] == "completed"
+    report = load_report(directory, "sweep-c4", "repeat01_closed.json")
+    assert report["summary"]["successful_requests"] > 0 and report["summary"]["p95_queue_wait_s"] is None
+    assert report["server_counters_delta"] is None
+    assert report["metadata"]["server"]["service"] == "openai-compatible"
+    assert any("different engine" in line for line in report["limitations"])
+    assert not any("one sequence at a time" in line or "fixed-slot" in line for line in report["limitations"])
+    assert server.fake.bodies and all(body["temperature"] == 0 and body["repetition_penalty"] == 1.0
+                                      for body in server.fake.bodies)
+
+
+def test_gpu_only_telemetry_is_collected_for_a_server_without_a_health_document(tmp_path):
+    with OpenAIServer() as server:
+        gpu_bench.run(openai_config(), url=server.url, output_dir=tmp_path / "vllm", config_path="inline.json")
+    report = load_report(tmp_path / "vllm", "sweep-c4", "repeat01_closed.json")
+    assert report["telemetry"]["server_samples"] == 0
+    overhead = json.loads((tmp_path / "vllm" / "manifest.json").read_text())["experiments"]["sweep-c4"]["telemetry_overhead"]
+    assert overhead["server_polls"] == 0 and overhead["server_poll_errors"] == 0
+
+
+def test_openai_config_requires_a_model_name_and_a_valid_api():
+    invalid(lambda c: c.update(api="openai"), "model_name")
+    invalid(lambda c: c.update(api="grpc"), "api must be")
+    cfg = openai_config()
+    gpu_bench.validate_config(cfg)

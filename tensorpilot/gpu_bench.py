@@ -53,6 +53,20 @@ BATCH_LIMITATIONS = (
     "Planning estimates are assumptions and are never reported as measurements.",
     "GPU clocks, temperature and co-tenancy are recorded by nvidia-smi samples, not controlled.",
 )
+OPENAI_LIMITATIONS = (
+    "The server is an OpenAI-compatible engine (for example vLLM) driven through /v1/completions; it is a different "
+    "engine, not a configuration of TensorPilot.",
+    "Token arrivals are server-sent-event chunks that carry text and the generated-token count is the server's usage "
+    "figure, so inter-token latency is measured per chunk and is not identical to TensorPilot's per-token events.",
+    "Server-side queue wait, KV pool and admission fields do not exist for this engine; only client timings and "
+    "nvidia-smi samples are available.",
+    "Sampling is pinned to greedy with the model repository's generation config disabled; text may still differ from "
+    "TensorPilot's because the engines use different kernels and numerics.",
+    "Client timings include loopback HTTP, a fresh connection per request and streaming parse time on the "
+    "load-generating host.",
+    "One model on one GPU; no multi-GPU or scaling claim.",
+    "GPU clocks, temperature and co-tenancy are recorded by nvidia-smi samples, not controlled.",
+)
 SMALL_SAMPLE = 100  # below this many completed requests, p95 and p99 are effectively the maximum
 COUNTERS = ("tensorpilot_jobs_total", "tensorpilot_rejected_requests_total", "tensorpilot_admission_decisions_total",
             "tensorpilot_output_tokens_total", "tensorpilot_worker_stalls_total")
@@ -81,6 +95,10 @@ def validate_config(config):
             raise ValueError(f"assumptions.{name} must be a positive number (planning only)")
     if assumptions.get("status") != "placeholder_unmeasured":
         raise ValueError("assumptions.status must be placeholder_unmeasured until a preflight measures them")
+    if config.get("api", "tensorpilot") not in ("tensorpilot", "openai"):
+        raise ValueError("api must be tensorpilot or openai")
+    if config.get("api") == "openai" and not isinstance(config.get("model_name"), str):
+        raise ValueError("model_name is required when api is openai")
     if "telemetry" in config:
         sampling = config["telemetry"]
         if not isinstance(sampling, dict) or set(sampling) - {"interval_s"} or (
@@ -234,16 +252,18 @@ def build_plan_for(experiment):
 
 
 def _namespace(url, plan_path, journal, *, requests, concurrency, rate, max_tokens, timeout, arrival="uniform",
-               burst_size=8, slo=None, seed=42):
+               burst_size=8, slo=None, seed=42, api="tensorpilot", model_name=None):
     return argparse.Namespace(
         url=url, requests=requests, concurrency=concurrency, rate=rate, max_tokens=max_tokens,
         timeout=timeout, workload="uniform", workload_file=str(plan_path), seed=seed, duration_s=None,
         max_requests=requests, journal=str(journal), journal_fsync=False, compact=False,
-        overwrite=True, arrival=arrival, burst_size=burst_size, slo=slo)
+        overwrite=True, arrival=arrival, burst_size=burst_size, slo=slo, api=api, model_name=model_name)
 
 
-def limitations_for(server):
-    """The limitation text that matches how the worker actually executes; serial keeps its original wording."""
+def limitations_for(server, api="tensorpilot"):
+    """The limitation text that matches how the server actually executes; serial keeps its original wording."""
+    if api == "openai":
+        return list(OPENAI_LIMITATIONS)
     return list(BATCH_LIMITATIONS if (server or {}).get("execution_mode") in ("batch", "adaptive") else LIMITATIONS)
 
 
@@ -323,11 +343,14 @@ async def run_experiment(config, experiment, *, url, output_dir, config_sha256, 
     artifacts, status, reason = [], "completed", None
     plan = build_plan_for(experiment)
     api_key = os.environ.get("TENSORPILOT_API_KEY")
+    api = config.get("api", "tensorpilot")
     extras = {"arrival": experiment.get("arrival", "uniform"), "burst_size": experiment.get("burst_size", 8),
-              "slo": experiment.get("slo")}
+              "slo": experiment.get("slo"), "api": api, "model_name": config.get("model_name")}
     collector, overhead = None, None
     if config.get("telemetry") and experiment.get("telemetry", True):
-        collector = telemetry.Collector(experiment_dir / "telemetry", url=url, api_key=api_key,
+        # An OpenAI-compatible server has no /health document in TensorPilot's shape: sample the GPU only.
+        collector = telemetry.Collector(experiment_dir / "telemetry", url=None if api == "openai" else url,
+                                        api_key=api_key,
                                         interval_s=config["telemetry"].get("interval_s", 1.0))
         await collector.start()
     try:
@@ -339,7 +362,7 @@ async def run_experiment(config, experiment, *, url, output_dir, config_sha256, 
             journal = experiment_dir / "warmup.requests.jsonl"
             await asyncio.wait_for(load.run(_namespace(
                 url, warm_path, journal, requests=experiment["warmup_requests"], concurrency=1, rate=0,
-                max_tokens=max_tokens, timeout=timeout)), cap_s)
+                max_tokens=max_tokens, timeout=timeout, api=api, model_name=config.get("model_name"))), cap_s)
             if collector:
                 collector.mark("warmup_end")
         if experiment["kind"] in ("open_loop", "saturation"):
@@ -358,7 +381,7 @@ async def run_experiment(config, experiment, *, url, output_dir, config_sha256, 
                 journal = experiment_dir / f"{name}.requests.jsonl"
                 args = _namespace(url, plan_path, journal, requests=len(plan), concurrency=concurrency,
                                   rate=rate, max_tokens=max_tokens, timeout=timeout, **extras)
-                counters_before = await scrape_counters(url, api_key)
+                counters_before = None if api == "openai" else await scrape_counters(url, api_key)
                 window_start = None
                 if collector:
                     window_start = collector.now()
@@ -375,14 +398,15 @@ async def run_experiment(config, experiment, *, url, output_dir, config_sha256, 
                     await collector.sample_now()
                     collector.mark(f"{name}_end")
                     result["telemetry"] = collector.window(window_start, collector.now())
-                result["server_counters_delta"] = counter_delta(counters_before, await scrape_counters(url, api_key))
+                result["server_counters_delta"] = (None if api == "openai" else
+                                                   counter_delta(counters_before, await scrape_counters(url, api_key)))
                 result["experiment"] = {"id": experiment["id"], "kind": experiment["kind"], "repeat": repeat,
                                         "arrival": label, "rate_per_s": rate or None,
                                         "arrival_process": extras["arrival"] if rate else "closed_loop",
                                         "description": experiment.get("description", "")}
                 result["config_sha256"] = config_sha256
                 result["target"] = config["target"]
-                result["limitations"] = limitations_for(result["metadata"].get("server"))
+                result["limitations"] = limitations_for(result["metadata"].get("server"), api)
                 result["statistics_caveat"] = statistics_caveat(result["summary"])
                 report = experiment_dir / f"{name}.json"
                 write_json(report, result)
@@ -403,11 +427,12 @@ async def run_experiment(config, experiment, *, url, output_dir, config_sha256, 
     return outcome
 
 
-def _server_health(url):
-    """One synchronous /health read so the manifest records the worker's mode and precision at the start."""
+def _server_health(url, api="tensorpilot"):
+    """One synchronous read so the manifest records the server's mode and precision at the start."""
     import urllib.request
     key = os.environ.get("TENSORPILOT_API_KEY")
-    request = urllib.request.Request(url.rstrip("/") + "/health", headers={"Authorization": "Bearer " + key} if key else {})
+    path = "/v1/models" if api == "openai" else "/health"
+    request = urllib.request.Request(url.rstrip("/") + path, headers={"Authorization": "Bearer " + key} if key else {})
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
             return json.loads(response.read())
@@ -434,15 +459,16 @@ def run(config, *, url, output_dir, only=None, config_path=None, session_minutes
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=False)
     digest = config_fingerprint(config)
-    server_at_start = _server_health(url)
+    api = config.get("api", "tensorpilot")
+    server_at_start = _server_health(url, api)
     session_started = time.monotonic()
     manifest = {"schema": SCHEMA, "run_id": uuid.uuid4().hex,
                 "started_at_utc": datetime.now(timezone.utc).isoformat(),
                 "config_path": str(config_path) if config_path else None, "config_sha256": digest,
                 "target": config["target"], "session_budget_minutes": budget_min,
                 "assumptions_status": config["assumptions"]["status"],
-                "experiments": {}, "limitations": limitations_for(server_at_start),
-                "server_at_start": server_at_start}
+                "experiments": {}, "limitations": limitations_for(server_at_start, api),
+                "server_at_start": server_at_start, "api": api}
     manifest_path = output / "manifest.json"
     for experiment in chosen:
         remaining = budget_min * 60 - (time.monotonic() - session_started)
