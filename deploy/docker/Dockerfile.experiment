@@ -17,6 +17,12 @@ RUN apt-get update \
  && mkdir -p /run/sshd \
  && usermod --shell /bin/bash --password '*' tensorpilot
 
+# The base image predates NF4 quantization. Installing the hash-locked CUDA requirements adds only what is missing
+# (bitsandbytes, accelerate, psutil); everything already installed at the locked version is left alone.
+COPY requirements-cuda.txt /tmp/requirements-cuda.txt
+RUN python -m pip install --no-cache-dir --require-hashes -r /tmp/requirements-cuda.txt \
+ && rm /tmp/requirements-cuda.txt
+
 # The experiment runs the tensorpilot source of the commit this image is built from, installed over the
 # base image's copy (dependencies are already in the base). The production image is not modified, so
 # a production tag keeps the code it was built with until a production release is cut deliberately.

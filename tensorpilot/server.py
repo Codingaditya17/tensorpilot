@@ -206,6 +206,8 @@ def create_app(factory, *, queue_size=8, max_tokens=256, max_timeout=120,
         response = web.StreamResponse(headers={"Content-Type": "application/x-ndjson",
                                                "X-Request-ID": job.request_id,
                                                "Cache-Control": "no-store"})
+        # The handler knows why it stops, so the engine records the right outcome without comparing clocks.
+        reason = "cancelled"
         try:
             await response.prepare(request)
             async with asyncio.timeout(timeout):
@@ -218,11 +220,12 @@ def create_app(factory, *, queue_size=8, max_tokens=256, max_timeout=120,
         except TimeoutError:
             # A slow client must not hold the handler beyond the deadline. The
             # consumer treats a stream without a terminal event as failed.
+            reason = "deadline_exceeded"
             response.force_close()
         except ConnectionError:
             response.force_close()
         finally:
-            engine.cancel(job)
+            engine.cancel(job, reason)
         return response
 
     app.cleanup_ctx.append(lifecycle)

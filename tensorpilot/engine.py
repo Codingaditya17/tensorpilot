@@ -227,11 +227,16 @@ class Engine:
         job.events.put_nowait(event)
         self._record_outcome(job, outcome)
 
-    def cancel(self, job):
+    def cancel(self, job, reason=None):
+        """Stop a job. ``reason`` is the caller's own knowledge of why: "deadline_exceeded" when its timeout
+        fired, "cancelled" when the client went away. Without one the code is inferred from the clock, which is
+        unreliable at timer granularity: a timeout can fire a fraction of a millisecond before the job's deadline."""
         if job.state in TERMINAL_STATES:
             return
+        if reason not in (None, "cancelled", "deadline_exceeded"):
+            raise ValueError("reason must be cancelled or deadline_exceeded")
         job.cancelled = True
-        job.cancel_code = "deadline_exceeded" if time.perf_counter() >= job.deadline else "cancelled"
+        job.cancel_code = reason or ("deadline_exceeded" if time.perf_counter() >= job.deadline else "cancelled")
         if self.queue.discard(job):
             outcome = "timed_out" if job.cancel_code == "deadline_exceeded" else "cancelled"
             self._finish_error(job, job.cancel_code, outcome)

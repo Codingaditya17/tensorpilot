@@ -263,3 +263,44 @@ def test_sustained_churn_returns_the_pool_to_idle_without_reservation_leaks(mode
     assert health["admission"]["reservations"] == 0
     assert health["kv_pool"]["pool_bytes_allocated"] == 5 * health["kv_pool"]["row_tokens"] * \
         health["kv_pool"]["bytes_per_token"], "the pool must never change size"
+
+
+def test_a_handler_timeout_is_a_deadline_even_when_the_timer_fires_before_the_jobs_own_deadline(model_dir, monkeypatch):
+    """Timer granularity can fire the handler's timeout a fraction of a millisecond before the job's deadline.
+    The handler knows why it is cancelling, so the outcome must not depend on that clock comparison."""
+    real_timeout = asyncio.timeout
+    monkeypatch.setattr(asyncio, "timeout", lambda delay: real_timeout(None if delay is None else delay * 0.2))
+
+    def slow_down(engine):
+        original = engine.adapter._forward
+
+        def slow(*args, **kwargs):
+            import time
+            time.sleep(0.01)  # the request must outlast the shortened handler timeout
+            return original(*args, **kwargs)
+
+        engine.adapter._forward = slow
+
+    async def scenario():
+        async with Server(model_dir, batch_size=2, hook=slow_down) as server:
+            status, events = await server.generate(prompt_of(4, 1), 250, timeout_s=0.5)
+            health = await server.settle()
+            metrics = await (await server.session.get(server.base + "/metrics")).text()
+        return events, health, metrics
+
+    events, health, metrics = asyncio.run(scenario())
+    assert not any(event["type"] == "done" for event in events)
+    assert 'tensorpilot_jobs_total{outcome="timed_out"} 1.0' in metrics
+    assert 'outcome="cancelled"' not in metrics
+    assert health["admission"]["reservations"] == 0
+
+
+def test_a_client_disconnect_is_still_recorded_as_a_cancellation_not_a_timeout(model_dir):
+    async def scenario():
+        async with Server(model_dir, batch_size=2) as server:
+            await server.generate(prompt_of(4, 1), 200, stop_after=2)
+            await server.settle()
+            return await (await server.session.get(server.base + "/metrics")).text()
+
+    metrics = asyncio.run(scenario())
+    assert 'tensorpilot_jobs_total{outcome="cancelled"} 1.0' in metrics and 'outcome="timed_out"' not in metrics

@@ -1,6 +1,7 @@
 # Allowlist: the experiment image gets only the package source, scripts, configs and docs it needs.
 *
 !pyproject.toml
+!requirements-cuda.txt
 !README.md
 !tensorpilot
 !deploy/runpod

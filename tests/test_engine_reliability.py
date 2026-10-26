@@ -1,6 +1,7 @@
 """Backend fault/cancellation tests use CPU stubs, not simulated GPU metrics."""
 import asyncio
 import threading
+import time
 
 import pytest
 
@@ -255,3 +256,62 @@ def test_queue_full_rolls_back_memory_reservation():
         finally:
             await engine.close()
     asyncio.run(scenario())
+
+
+def test_an_explicit_cancel_reason_overrides_the_clock_in_both_directions():
+    """The caller's reason wins whichever side of the deadline the clock says it is on."""
+    from tensorpilot.engine import Job
+
+    async def scenario():
+        engine = Engine(lambda: FakeBackend(), queue_size=4, metrics=Metrics())
+        now = time.perf_counter()
+        before_deadline = Job("a", 4, deadline=now + 60)     # the clock says: not yet expired
+        after_deadline = Job("b", 4, deadline=now - 60)      # the clock says: long expired
+        engine.cancel(before_deadline, "deadline_exceeded")  # but the caller's own timeout fired
+        engine.cancel(after_deadline, "cancelled")           # but the caller says the client left
+        return (engine._classify(before_deadline, TimeoutError()), engine._classify(after_deadline, TimeoutError()),
+                [before_deadline.cancel_code, after_deadline.cancel_code])
+
+    early, late, codes = asyncio.run(scenario())
+    assert early == ("deadline_exceeded", "timed_out") and late == ("cancelled", "cancelled")
+    assert codes == ["deadline_exceeded", "cancelled"]
+
+
+def test_a_queued_job_cancelled_with_a_reason_is_finished_with_that_outcome():
+    async def scenario():
+        gate = threading.Event()
+        engine = Engine(lambda: GatedBackend(gate), queue_size=4, metrics=Metrics())
+        await engine.start(warmup=False)
+        try:
+            blocker = engine.submit("hold the worker", 4, 30)
+            await asyncio.sleep(0.05)  # the blocker occupies the model thread, so the next job stays queued
+            queued = engine.submit("a", 4, 30)
+            engine.cancel(queued, "deadline_exceeded")
+            return queued.state, (await queued.events.get())["code"]
+        finally:
+            gate.set()
+            engine.cancel(blocker)
+            await engine.close()
+
+    assert asyncio.run(scenario()) == ("timed_out", "deadline_exceeded")
+
+
+def test_without_a_reason_the_clock_decides_and_an_invalid_reason_is_refused():
+    async def scenario():
+        gate = threading.Event()
+        engine = Engine(lambda: GatedBackend(gate), queue_size=4, metrics=Metrics())
+        await engine.start(warmup=False)
+        try:
+            blocker = engine.submit("hold the worker", 4, 30)
+            await asyncio.sleep(0.05)
+            job = engine.submit("a", 4, 30)
+            with pytest.raises(ValueError, match="reason must be"):
+                engine.cancel(job, "because")
+            engine.cancel(job)
+            return job.state
+        finally:
+            gate.set()
+            engine.cancel(blocker)
+            await engine.close()
+
+    assert asyncio.run(scenario()) == "cancelled"
