@@ -36,6 +36,9 @@ def make_backend(model_dir, architecture, qwen2_dir=None):
     base, _, mode = architecture.partition("-")
     mode = mode or "none"
     backend = CUDABackend(str(model_dir), device="cpu", allow_cpu=True, dtype="float32", quantization=mode)
+    # A random tiny model can emit its configured EOS id by chance, and which prompts do depends on the host CPU's
+    # numerics (NF4 especially). Take the real EOS out of play; the EOS test below declares its own.
+    backend.eos_token_ids = frozenset()
     if base == "qwen2":
         from transformers import AutoModelForCausalLM
         if mode == "none":

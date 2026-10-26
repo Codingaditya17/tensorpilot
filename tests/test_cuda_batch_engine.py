@@ -31,15 +31,22 @@ def prompt_of(length, seed):
     return " ".join(rng.choice(WORDS) for _ in range(length))
 
 
-def reference(model_dir, prompt, max_tokens, mode="none"):
+def tiny_backend(model_dir, mode="none"):
+    """A random tiny model can emit its configured EOS id by chance, depending on the host CPU's numerics; take it out of play."""
     backend = CUDABackend(str(model_dir), device="cpu", allow_cpu=True, dtype="float32", quantization=mode)
+    backend.eos_token_ids = frozenset()
+    return backend
+
+
+def reference(model_dir, prompt, max_tokens, mode="none"):
+    backend = tiny_backend(model_dir, mode)
     return [t.token_id for t in backend.stream(prompt, max_tokens) if t.output]
 
 
 class Server:
     def __init__(self, model_dir, *, batch_size=4, queue_size=16, hook=None, mode="none", **options):
         def factory():
-            return CUDABackend(str(model_dir), device="cpu", allow_cpu=True, dtype="float32", quantization=mode)
+            return tiny_backend(model_dir, mode)
 
         self.app = create_app(factory, execution="batch", batch_size=batch_size, queue_size=queue_size,
                               prefill_step_size=8, warmup=False, api_key=KEY,
