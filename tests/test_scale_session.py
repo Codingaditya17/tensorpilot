@@ -335,7 +335,8 @@ def wait_for(predicate, seconds=90):
 
 
 def benchmark_started(tmp_path):
-    return any(tmp_path.glob("session/*/bench/*/*.requests.jsonl"))
+    # A measured repeat has begun once its own journal exists; the warmup journal appears earlier and does not count.
+    return any(tmp_path.glob("session/*/bench/*/repeat*.requests.jsonl"))
 
 
 @pytest.mark.parametrize("name,code", [("SIGTERM", 143), ("SIGINT", 130), ("SIGHUP", 129)])

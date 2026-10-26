@@ -225,7 +225,10 @@ def preflight_14b(tmp_path, **overrides):
     return preflight(**options)
 
 
-def test_14b_bf16_is_rejected_on_vram_but_nf4_is_judged_on_its_quantized_size(tmp_path):
+def test_14b_bf16_is_rejected_on_vram_but_nf4_is_judged_on_its_quantized_size(tmp_path, monkeypatch):
+    # The real bitsandbytes probe is covered in test_quantization; here only the size judgement is under test, so the
+    # result must not depend on whether this host has bitsandbytes installed.
+    monkeypatch.setattr("tensorpilot.quantization.require_stack", lambda mode: None)
     bf16 = by_name(preflight_14b(tmp_path))
     assert bf16["vram"]["status"] == "fail" and "need 29" in bf16["vram"]["detail"]
     nf4 = by_name(preflight_14b(tmp_path, quantization="nf4"))
