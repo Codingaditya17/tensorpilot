@@ -358,8 +358,8 @@ def validate_config(args):
     for name in ("requests", "concurrency", "max_tokens"):
         if type(getattr(args, name)) is not int or getattr(args, name) < 1:
             raise ValueError(f"{name} must be a positive integer")
-    if args.requests > 100000 or args.concurrency > 256 or args.max_tokens > 512:
-        raise ValueError("limits: requests <= 100000, concurrency <= 256, max_tokens <= 512")
+    if args.requests > 100000 or args.concurrency > MAX_CONCURRENCY or args.max_tokens > 512:
+        raise ValueError(f"limits: requests <= 100000, concurrency <= {MAX_CONCURRENCY}, max_tokens <= 512")
     if not math.isfinite(args.rate) or args.rate < 0 or not math.isfinite(args.timeout) or not 0 < args.timeout <= 120:
         raise ValueError("rate must be finite and nonnegative; timeout must be in (0, 120]")
     duration = getattr(args, "duration_s", None)
@@ -404,6 +404,26 @@ async def _server_state(session, url, api):
             "models": [{"id": m.get("id"), "max_model_len": m.get("max_model_len")} for m in models]}
 
 
+MAX_CONCURRENCY = 1024
+FD_HEADROOM = 128   # sockets for the server probe, journal, telemetry and the interpreter itself
+
+
+def ensure_fd_limit(concurrency):
+    """Every in-flight request holds a socket. Raise the soft descriptor limit if needed, or refuse before the run starts,
+    so a 1,024-client point fails with a clear message instead of as 'Too many open files' mid-experiment."""
+    try:
+        import resource
+    except ImportError:   # not POSIX: nothing to check
+        return
+    needed = concurrency + FD_HEADROOM
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if soft == resource.RLIM_INFINITY or soft >= needed:
+        return
+    if hard != resource.RLIM_INFINITY and hard < needed:
+        raise RuntimeError(f"concurrency {concurrency} needs about {needed} open files but the hard limit is {hard}; "
+                           "raise it (ulimit -n) or lower the concurrency")
+    resource.setrlimit(resource.RLIMIT_NOFILE, (needed, hard))
+
 async def run(args):
     validate_config(args)
     workload_path = getattr(args, "workload_file", None)
@@ -423,6 +443,7 @@ async def run(args):
     request_client = request_openai if api == "openai" else request_one
     # No keep-alive: the server force-closes a connection when a request hits its deadline, and a pooled
     # connection reused right after would fail the next, unrelated request. Each request pays one loopback connect.
+    ensure_fd_limit(args.concurrency)
     connector = aiohttp.TCPConnector(limit=args.concurrency, force_close=True)
     api_key = os.environ.get("TENSORPILOT_API_KEY")
     headers = {"Authorization": "Bearer " + api_key} if api_key else {}

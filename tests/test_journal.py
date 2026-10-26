@@ -111,7 +111,7 @@ def test_duration_stops_dispatch_and_cancellation_leaves_recoverable_records(tmp
 
 
 @pytest.mark.parametrize("field,value", [("duration_s", 0), ("duration_s", float("inf")),
-                                        ("max_requests", 100001), ("concurrency", 1000)])
+                                        ("max_requests", 100001), ("concurrency", 1025)])
 def test_unsafe_workload_configuration_is_rejected(field, value):
     args = SimpleNamespace(requests=10, concurrency=1, rate=0, max_tokens=32, timeout=5)
     setattr(args, field, value)

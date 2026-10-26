@@ -446,3 +446,103 @@ def test_incremental_text_survives_multibyte_characters_split_across_tokens():
     detok = IncrementalDetokenizer(tokenizer)
     streamed = "".join(detok.add(token) for token in noise) + detok.flush()
     assert streamed == tokenizer.decode(noise)
+
+
+# ----- packed prefill and the logit-margin probe (v1.0 rc2) -------------------------------------------------------
+
+PACK = 64
+
+
+def test_packed_prefill_equals_serial_for_a_burst_of_varied_prompts(backend):
+    plan = [(0, prompt_of(length, seed), max_tokens)
+            for seed, (length, max_tokens) in enumerate([(1, 6), (3, 9), (7, 12), (12, 4), (5, 9), (2, 15), (9, 3), (5, 8)])]
+    adapter = make_adapter(backend, capacity=8, prefill_step_size=16, prefill_pack_tokens=PACK)
+    results = drive(adapter, plan)
+    assert_matches_serial(backend, plan, results)
+    assert adapter.counters["prefill_packed_sequences"] == 8
+    assert adapter.counters["prefill_packed_forwards"] < 8, "packing must reduce the number of prefill forwards"
+
+
+def test_packed_and_unpacked_prefill_emit_identical_tokens_step_for_step_in_content(backend):
+    plan = [(0, prompt_of(length, seed + 40), 10) for seed, length in enumerate([4, 9, 2, 14, 6, 11])]
+    packed = drive(make_adapter(backend, capacity=6, prefill_step_size=16, prefill_pack_tokens=PACK), plan)
+    legacy = drive(make_adapter(backend, capacity=6, prefill_step_size=16), plan)
+    assert {i: r["ids"] for i, r in packed.items()} == {i: r["ids"] for i, r in legacy.items()}
+
+
+def test_packed_prefill_with_first_token_finishers_closes_the_slot_gaps(backend):
+    # Rows 0, 2 and 4 finish on their first token; the survivors must be moved down with their K/V intact.
+    plan = [(0, prompt_of(length, seed + 70), max_tokens)
+            for seed, (length, max_tokens) in enumerate([(5, 1), (7, 11), (3, 1), (9, 13), (4, 1), (6, 9)])]
+    adapter = make_adapter(backend, capacity=6, prefill_step_size=16, prefill_pack_tokens=PACK)
+    results = drive(adapter, plan)
+    assert_matches_serial(backend, plan, results)
+    assert adapter.counters["slot_moves"] >= 1, "the test must exercise the gap-closing copy"
+    assert not adapter.decoding and not adapter.sequences
+
+
+def test_a_long_prompt_ends_the_pack_and_keeps_fifo_order_through_the_staging_path(backend):
+    plan = [(0, prompt_of(4, 81), 6), (0, prompt_of(5, 82), 6), (0, prompt_of(45, 83), 6),
+            (0, prompt_of(3, 84), 6), (0, prompt_of(6, 85), 6)]
+    adapter = make_adapter(backend, capacity=5, prefill_step_size=8, prefill_pack_tokens=PACK)
+    order = []
+    results = drive(adapter, plan, hook=lambda n, step: order.extend(
+        uid for uid, token in step.events if step.phase == "prefill"))
+    assert_matches_serial(backend, plan, results)
+    assert order == sorted(order), "first tokens must come out in arrival order"
+    assert adapter.counters["prefill_packed_sequences"] == 4  # everything except the 45-token prompt
+
+
+def test_the_pack_respects_its_padded_token_budget_and_the_free_row_count(backend):
+    adapter = make_adapter(backend, capacity=8, prefill_step_size=16, prefill_pack_tokens=24)
+    for seed in range(8):
+        adapter.insert(prompt_of(10, seed + 90), 4)
+    group = adapter._pack_group()
+    assert 1 <= len(group) and len(group) * max(len(s.prompt_ids) for s in group) <= 24
+    adapter.close()
+    tight = make_adapter(backend, capacity=3, prefill_step_size=16, prefill_pack_tokens=4096)
+    for seed in range(3):
+        tight.insert(prompt_of(3, seed + 95), 4)
+    assert len(tight._pack_group()) == 3
+
+
+def test_packed_slots_are_reused_after_finishing_without_leaking_old_kv(backend):
+    rng = random.Random(11)
+    plan = [(rng.randrange(0, 30), prompt_of(rng.randrange(1, 14), i + 120), rng.randrange(1, 12)) for i in range(20)]
+    adapter = make_adapter(backend, capacity=4, prefill_step_size=16, prefill_pack_tokens=PACK)
+    results, pending, index_of, step_no = {}, sorted(enumerate(plan), key=lambda item: item[1][0]), {}, 0
+    while pending or adapter.sequences:
+        while pending and pending[0][1][0] <= step_no and len(adapter.sequences) < adapter.capacity:
+            index, (_, prompt, mt) = pending.pop(0)
+            index_of[adapter.insert(prompt, mt)] = index
+            results[index] = {"ids": [], "finish": None, "text": ""}
+        if adapter.sequences:
+            for uid, token in adapter.step().events:
+                entry = results[index_of[uid]]
+                entry["text"] += token.text
+                if token.output:
+                    entry["ids"].append(token.token_id)
+                if token.finish_reason:
+                    entry["finish"] = token.finish_reason
+        step_no += 1
+        assert step_no < 5000
+    assert_matches_serial(backend, plan, results)
+
+
+def test_packing_validation_and_default_off(backend):
+    assert make_adapter(backend).prefill_pack_tokens == 0
+    for bad in (-1, 1.5, "8", 16385):
+        with pytest.raises(ValueError, match="prefill_pack_tokens"):
+            make_adapter(backend, prefill_pack_tokens=bad)
+
+
+def test_the_margin_probe_records_one_gap_per_emitted_token_and_never_changes_the_output(backend):
+    plan = [(0, prompt_of(length, seed + 140), 9) for seed, length in enumerate([4, 7, 3, 10])]
+    quiet = drive(make_adapter(backend, capacity=4, prefill_pack_tokens=PACK), plan)
+    adapter = make_adapter(backend, capacity=4, prefill_pack_tokens=PACK)
+    adapter.margin_probe = {}
+    probed = drive(adapter, plan)
+    assert {i: r["ids"] for i, r in probed.items()} == {i: r["ids"] for i, r in quiet.items()}
+    assert sorted(len(v) for v in adapter.margin_probe.values()) == sorted(len(r["ids"]) for r in probed.values())
+    assert all(high >= low and first != second
+               for steps in adapter.margin_probe.values() for first, second, high, low in steps)

@@ -57,7 +57,9 @@ jobs:
                 tests/test_scale_session.py tests/test_fault_run.py tests/test_suite.py tests/test_telemetry.py \
                 tests/test_batch_invariance.py tests/test_report_v10.py tests/test_vllm_environment.py \
                 tests/test_baseline.py tests/test_load_scale.py tests/test_load_openai.py \
-                tests/test_memory_gate.py tests/test_quick_compare.py'
+                tests/test_memory_gate.py tests/test_quick_compare.py tests/test_acceptance.py \
+                tests/test_production_suite.py tests/test_divergence_probe.py tests/test_stage_info.py \
+                tests/test_baseline_quick.py tests/test_server_cli.py tests/test_journal.py'
       - name: Verify SSH hardening, permissions, evidence path and shutdown (no GPU)
         run: deploy/runpod/test-pod-image.sh tensorpilot-exp:ci --slow
 
@@ -89,4 +91,6 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: ${{ steps.image.outputs.name }}:${{ steps.image.outputs.tag }}
-          build-args: SOURCE_SHA=${{ github.sha }}
+          build-args: |
+            SOURCE_SHA=${{ github.sha }}
+            IMAGE_TAG=${{ steps.image.outputs.tag }}

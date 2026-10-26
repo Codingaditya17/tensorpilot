@@ -1,0 +1,222 @@
+{
+  "schema": "tensorpilot.quick-verdict/v1",
+  "criteria": {
+    "batched_c8_throughput_over_serial_c8": 1.5,
+    "batched_c1_throughput_over_serial_c1": 0.7,
+    "invariance_exact_fraction_min": 0.9
+  },
+  "serial": {
+    "manifest_present": true,
+    "interrupted": false,
+    "experiments": {
+      "cold-start": {
+        "repeats": 1,
+        "requests": 8,
+        "completed": 8,
+        "failed": 0,
+        "tok_per_s": 52.63196323740741,
+        "p95_ttft_s": 0.025054552886285816
+      },
+      "quick-c1": {
+        "repeats": 1,
+        "requests": 24,
+        "completed": 24,
+        "failed": 0,
+        "tok_per_s": 52.250108252046225,
+        "p95_ttft_s": 0.026138881244696675
+      },
+      "quick-c8": {
+        "repeats": 1,
+        "requests": 64,
+        "completed": 64,
+        "failed": 0,
+        "tok_per_s": 52.46361805060418,
+        "p95_ttft_s": 6.4994330201676345
+      }
+    },
+    "statuses": {
+      "cold-start": "completed",
+      "quick-c1": "completed",
+      "quick-c8": "completed"
+    },
+    "invariance": null,
+    "memory_gate": null
+  },
+  "batch": {
+    "manifest_present": true,
+    "interrupted": false,
+    "experiments": {
+      "cold-start": {
+        "repeats": 1,
+        "requests": 8,
+        "completed": 8,
+        "failed": 0,
+        "tok_per_s": 49.798630061216706,
+        "p95_ttft_s": 0.028201942058512938
+      },
+      "quick-c1": {
+        "repeats": 1,
+        "requests": 24,
+        "completed": 24,
+        "failed": 0,
+        "tok_per_s": 48.81422256913704,
+        "p95_ttft_s": 0.026506998340482823
+      },
+      "quick-c8": {
+        "repeats": 1,
+        "requests": 64,
+        "completed": 64,
+        "failed": 0,
+        "tok_per_s": 284.60389448783866,
+        "p95_ttft_s": 0.22147914734377966
+      },
+      "quick-c32": {
+        "repeats": 1,
+        "requests": 128,
+        "completed": 128,
+        "failed": 0,
+        "tok_per_s": 644.2269332695594,
+        "p95_ttft_s": 1.1663648647430815
+      },
+      "quick-c128": {
+        "repeats": 1,
+        "requests": 256,
+        "completed": 256,
+        "failed": 0,
+        "tok_per_s": 759.1807580278163,
+        "p95_ttft_s": 5.419875713734655
+      },
+      "quick-cancel": {
+        "repeats": 1,
+        "requests": 96,
+        "completed": 72,
+        "failed": 0,
+        "tok_per_s": 536.0732957455043,
+        "p95_ttft_s": 1.4008783795987256
+      }
+    },
+    "statuses": {
+      "cold-start": "completed",
+      "quick-c1": "completed",
+      "quick-c8": "completed",
+      "quick-c32": "completed",
+      "quick-c128": "completed",
+      "quick-cancel": "completed"
+    },
+    "invariance": {
+      "schema": "tensorpilot.batch-invariance/v1",
+      "at_utc": "2026-10-26T19:05:18.947000+00:00",
+      "url": "(loopback worker)",
+      "prompts": 32,
+      "plan_classes": {
+        "short": 23,
+        "medium": 9
+      },
+      "solo_summary": {
+        "successful_requests": 32,
+        "failed_requests": 0
+      },
+      "together_summary": {
+        "successful_requests": 32,
+        "failed_requests": 0
+      },
+      "together_vs_solo": {
+        "requests": 32,
+        "comparable": 32,
+        "exact_matches": 31,
+        "exact_match_fraction": 0.96875,
+        "mean_prefix_fraction": 0.97265625,
+        "diverged": 1,
+        "earliest_divergence": 7,
+        "median_divergence": 7,
+        "not_comparable": 0,
+        "diverged_requests": [
+          {
+            "index": 21,
+            "first_divergence": 7,
+            "solo_tokens": 56,
+            "test_tokens": 56
+          }
+        ]
+      },
+      "staggered_vs_solo": {
+        "requests": 32,
+        "comparable": 32,
+        "exact_matches": 31,
+        "exact_match_fraction": 0.96875,
+        "mean_prefix_fraction": 0.97265625,
+        "diverged": 1,
+        "earliest_divergence": 7,
+        "median_divergence": 7,
+        "not_comparable": 0,
+        "diverged_requests": [
+          {
+            "index": 21,
+            "first_divergence": 7,
+            "solo_tokens": 56,
+            "test_tokens": 56
+          }
+        ]
+      },
+      "reading_guide": [
+        "exact_match_fraction near 1 means a request's output does not depend on its co-batched neighbours",
+        "divergence late in a sequence is the signature of a numeric near-tie; divergence at the start, or token-count differences, indicate a real defect",
+        "bf16/fp16 batching changes reduction order, so some divergence on a GPU is expected and is measured here rather than assumed away"
+      ]
+    },
+    "memory_gate": {
+      "ok": true,
+      "checks": [
+        {
+          "name": "measured_margin_inside_the_allocator_cap",
+          "passed": true,
+          "detail": "17.83 GiB free of a 21.17 GiB cap at peak reserved 3.33 GiB (need 1.5 GiB)",
+          "margin_gib": 17.833,
+          "cap_gib": 21.167,
+          "peak_reserved_gib": 3.334
+        },
+        {
+          "name": "pool_holds_the_requested_slots",
+          "passed": true,
+          "detail": "128 slot(s) granted, 128 requested",
+          "granted": 128,
+          "requested": 128
+        }
+      ]
+    }
+  },
+  "passed": true,
+  "checks": [
+    {
+      "name": "batched_c8_beats_serial_c8",
+      "passed": true,
+      "detail": "285 vs 52 tok/s = 5.42x (need 1.5x)"
+    },
+    {
+      "name": "batched_c1_not_much_slower",
+      "passed": true,
+      "detail": "49 vs 52 tok/s = 0.93x (need 0.7x)"
+    },
+    {
+      "name": "no_failed_requests_and_every_experiment_completed",
+      "passed": true,
+      "detail": "failed requests: none; not completed: none"
+    },
+    {
+      "name": "batch_invariance",
+      "passed": true,
+      "detail": "exact-match fraction {'together_vs_solo': 0.96875, 'staggered_vs_solo': 0.96875}; earliest divergence (token index) {'together_vs_solo': 7, 'staggered_vs_solo': 7}. Divergence at the very start of a sequence would indicate a defect rather than a numeric near-tie."
+    },
+    {
+      "name": "memory_gate",
+      "passed": true,
+      "detail": "17.83 GiB free of a 21.17 GiB cap at peak reserved 3.33 GiB (need 1.5 GiB); 128 slot(s) granted, 128 requested"
+    },
+    {
+      "name": "neither_stage_was_interrupted",
+      "passed": true,
+      "detail": ""
+    }
+  ],
+  "meaning": "PASS only means the 7B session is worth its cost. It is not a performance result."
+}

@@ -162,11 +162,11 @@ def test_the_new_experiment_fields_are_validated():
     invalid(lambda c: c.update(telemetry={"interval_s": 1, "extra": 1}), "telemetry")
 
 
-def test_the_concurrency_ceiling_now_covers_the_128_client_sweep_but_not_beyond_256():
+def test_the_concurrency_ceiling_covers_the_1024_client_sweep_but_not_beyond():
     cfg = config()
-    cfg["experiments"][0]["concurrency"] = 128
+    cfg["experiments"][0]["concurrency"] = 1024
     gpu_bench.validate_config(cfg)
-    cfg["experiments"][0]["concurrency"] = 257
+    cfg["experiments"][0]["concurrency"] = 1025
     with pytest.raises(ValueError, match="concurrency"):
         gpu_bench.validate_config(cfg)
 

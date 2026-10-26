@@ -257,3 +257,55 @@ def test_the_ladder_chart_draws_the_ideal_as_a_dashed_reference_not_as_a_series(
     svg = (out / "charts" / "ladder-7b-bf16-batch.svg").read_text()
     assert 'stroke-dasharray="6 4"' in svg and "ideal: every offered request meets the SLO" in svg
     assert len(re.findall(r"var\(--s\d\)", svg.split("</style>")[1])) >= 1 and "var(--s2)" not in svg.split("</style>")[1]
+
+
+# ----- production-scale additions ---------------------------------------------------------------------------------
+
+def test_profile_rows_show_a_flat_step_time_and_low_utilization_from_the_workers_counters(tmp_path):
+    import json
+    from acceptance_fixture import Session, good_records
+    session = Session(tmp_path / "s")
+    session.experiment("7b-bf16-prod", "scale-c32", good_records(12))
+    folder = session.stage_dir("7b-bf16-prod") / "bench" / "scale-c32" / "telemetry"
+    rows = [{"t": 0.0, "decode_steps": 100, "decode_tokens": 100, "decode_execution_s": 2.0, "prefill_chunks": 10,
+             "prefill_execution_s": 0.2, "queue_depth": 0, "active_sequences": 0},
+            {"t": 10.0, "decode_steps": 600, "decode_tokens": 8100, "decode_execution_s": 12.0, "prefill_chunks": 110,
+             "prefill_execution_s": 2.4, "queue_depth": 3, "active_sequences": 32}]
+    (folder / "server.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    (folder / "gpu.jsonl").write_text("\n".join(json.dumps({"t": t, "util_gpu_pct": 20.0, "power_w": 65.0}) for t in range(10)))
+    from tensorpilot import report_v10
+    stages = report_v10.load_session(session.root)
+    [row] = report_v10.profile_rows(stages["7b-bf16-prod"])
+    assert row["tokens_per_step"] == pytest.approx(16.0) and row["ms_per_decode_step"] == pytest.approx(20.0)
+    assert row["ms_per_prefill_chunk"] == pytest.approx(22.0)
+    assert row["engine_busy"] == pytest.approx(1.22)
+    assert row["prefill_share"] == pytest.approx(2.2 / 12.2) and row["gpu_util_mean"] == 20.0
+    assert row["max_queue"] == 3 and row["max_active"] == 32
+
+
+def test_the_report_covers_the_production_sweep_the_vllm_pair_and_embeds_the_acceptance_verdict(tmp_path):
+    import json
+    from acceptance_fixture import Session
+    from tensorpilot import acceptance, report_v10
+    session = Session(tmp_path / "s").build()
+    verdict = acceptance.evaluate(session.root, criteria=session.criteria)
+    verdict_path = tmp_path / "verdict.json"
+    verdict_path.write_text(json.dumps(verdict))
+    report_v10.build(session.root, tmp_path / "out", acceptance=verdict_path)
+    text = (tmp_path / "out" / "report.md").read_text()
+    assert "## Acceptance: evaluation INCONCLUSIVE" in text      # no archives, ledger or spend were supplied
+    assert "## Concurrency sweep: 7b-bf16-prod" in text and "| 1024 |" in text
+    assert "TensorPilot against vLLM: 7b-bf16-prod vs vllm-7b-bf16-prod" in text
+    assert "Serial against continuous batching: 7b-bf16-prod-serial vs 7b-bf16-prod" in text
+
+
+def test_profile_rows_skip_the_serial_worker_whose_step_counters_are_null(tmp_path):
+    import json
+    from acceptance_fixture import Session, good_records
+    session = Session(tmp_path / "s")
+    session.experiment("7b-bf16-prod-serial", "cmp-c1", good_records(12))
+    folder = session.stage_dir("7b-bf16-prod-serial") / "bench" / "cmp-c1" / "telemetry"
+    nulls = {"decode_steps": None, "decode_tokens": None, "decode_execution_s": None, "prefill_chunks": None, "queue_depth": 0}
+    (folder / "server.jsonl").write_text("\n".join(json.dumps({"t": float(t), **nulls}) for t in range(3)) + "\n")
+    stages = report.load_session(session.root)
+    assert report.profile_rows(stages["7b-bf16-prod-serial"]) == []

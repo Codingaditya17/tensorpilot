@@ -270,6 +270,12 @@ def main():
     parser.add_argument("--kv-headroom-gib", type=float, default=2.5,
                         help="CUDA batch: VRAM kept free of weights and KV for activations and allocator overhead")
     parser.add_argument("--prefill-step-size", type=int, default=256, help="batch prefill segmentation (1..2048)")
+    parser.add_argument("--backlog", type=int, default=128,
+                        help="listen backlog; the 512- and 1024-client points open that many connections at once "
+                             "(the kernel caps it at net.core.somaxconn)")
+    parser.add_argument("--prefill-pack-tokens", type=int, default=0,
+                        help="CUDA batch: pack fresh short prompts into one prefill forward of at most this many padded "
+                             "tokens (0 = one prompt per forward)")
     parser.add_argument("--adaptive-latency-target", type=float, default=.25,
                         help="oldest queue wait that triggers maximum adaptive width")
     parser.add_argument("--adaptive-memory-soft-limit", type=float, default=.85,
@@ -304,6 +310,10 @@ def main():
         parser.error("queue-size must be positive; memory-gib in (0, 8]; output cap in 1..512")
     if not 1 <= args.max_prompt_tokens <= 8192:
         parser.error("max-prompt-tokens must be in 1..8192")
+    if not 1 <= args.backlog <= 65535:
+        parser.error("backlog must be in 1..65535")
+    if not 0 <= args.prefill_pack_tokens <= 16384:
+        parser.error("prefill-pack-tokens must be in 0..16384")
     if args.admission_memory_mib < 1 or args.admission_bytes_per_token < 1:
         parser.error("admission memory and bytes-per-token must be positive")
     if not math.isfinite(args.max_queue_wait) or args.max_queue_wait <= 0:
@@ -362,7 +372,7 @@ def main():
                               profile_memory=args.profile_memory, cache_dir=args.cache_dir)
     else:
         metadata = {"model": args.model, "backend": "cuda", "warmup": True, "quantization_mode": args.quantization,
-                    **common}
+                    "prefill_pack_tokens": args.prefill_pack_tokens, "listen_backlog": args.backlog, **common}
         if args.gpu_telemetry_interval > 0:
             telemetry = GPUTelemetry(args.gpu_telemetry_interval)
 
@@ -376,7 +386,7 @@ def main():
         from .cuda_batch import CUDABatchAdapterFactory
         adapter_factory = CUDABatchAdapterFactory(
             kv_budget_bytes=int(args.kv_budget_gib * 1024**3) or None,
-            headroom_bytes=int(args.kv_headroom_gib * 1024**3))
+            headroom_bytes=int(args.kv_headroom_gib * 1024**3), prefill_pack_tokens=args.prefill_pack_tokens)
     app = create_app(factory,
                      queue_size=args.queue_size, max_tokens=args.max_output_tokens,
                      metadata=metadata, api_key=api_key,
@@ -390,7 +400,8 @@ def main():
                      adaptive_memory_soft_limit=args.adaptive_memory_soft_limit,
                      adaptive_memory_hard_limit=args.adaptive_memory_hard_limit,
                      gpu_telemetry=telemetry, batch_adapter_factory=adapter_factory)
-    web.run_app(app, host=args.host, port=args.port, handler_cancellation=True, access_log=None)
+    web.run_app(app, host=args.host, port=args.port, handler_cancellation=True, access_log=None,
+                backlog=args.backlog)
 
 
 if __name__ == "__main__":

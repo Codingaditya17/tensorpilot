@@ -83,17 +83,17 @@ def _minutes(expected):
     return round(expected + SETUP_MINUTES, 1)
 
 
-def _cap(expected_minutes):
-    return int(min(240, max(5, math.ceil(expected_minutes * CAP_FACTOR) + 2)))
+def _cap(expected_minutes, factor=None):
+    return int(min(240, max(5, math.ceil(expected_minutes * (factor or CAP_FACTOR)) + 2)))
 
 
 def closed(model, execution, name, concurrency, requests, workload, *, repeats=1, warmup=4, timeout_s=120,
-           abort_error_rate=0.5, slo=True, telemetry=True, description=""):
+           abort_error_rate=0.5, slo=True, telemetry=True, description="", cap_factor=None):
     seconds = repeats * requests * mean_output_tokens(workload) / aggregate_tok_s(model, concurrency, execution)
     expected = _minutes(seconds / 60 + warmup * 0.05)
     experiment = {"id": name, "kind": "closed_loop", "description": description, "requests": requests,
                   "concurrency": concurrency, "repeats": repeats, "warmup_requests": warmup, "timeout_s": timeout_s,
-                  "workload_spec": workload, "estimated_minutes": expected, "max_minutes": _cap(expected),
+                  "workload_spec": workload, "estimated_minutes": expected, "max_minutes": _cap(expected, cap_factor),
                   "abort_error_rate": abort_error_rate}
     if slo:
         experiment["slo"] = dict(MODELS[model]["slo"])
@@ -103,15 +103,16 @@ def closed(model, execution, name, concurrency, requests, workload, *, repeats=1
 
 
 def ladder(model, execution, name, rates, requests, workload, *, arrival="poisson", burst_size=None, timeout_s=120,
-           abort_error_rate=0.2, warmup=4, description="", slo=True):
+           abort_error_rate=0.2, warmup=4, description="", slo=True, concurrency=256, cap_factor=None):
     capacity = aggregate_tok_s(model, 10**6, execution)
     per_request_s = mean_output_tokens(workload) / capacity
     seconds = sum(max(requests / rate, requests * per_request_s) for rate in rates)
     expected = _minutes(seconds / 60 + warmup * 0.05)
     experiment = {"id": name, "kind": "open_loop", "description": description, "requests": requests,
-                  "concurrency": 256, "rates": list(rates), "arrival": arrival, "repeats": 1,
+                  "concurrency": concurrency, "rates": list(rates), "arrival": arrival, "repeats": 1,
                   "warmup_requests": warmup, "timeout_s": timeout_s, "workload_spec": workload,
-                  "estimated_minutes": expected, "max_minutes": _cap(expected), "abort_error_rate": abort_error_rate}
+                  "estimated_minutes": expected, "max_minutes": _cap(expected, cap_factor),
+                  "abort_error_rate": abort_error_rate}
     if burst_size:
         experiment["burst_size"] = burst_size
     if slo:
@@ -120,6 +121,18 @@ def ladder(model, execution, name, rates, requests, workload, *, arrival="poisso
 
 
 SWEEP = (1, 8, 16, 32, 64, 128)
+PREFILL_PACK_TOKENS = 2048    # padded tokens per packed prefill forward (8 prompts of 256, or 32 of 64)
+PROD_QUEUE = 1100             # admits all 1,024 clients; the overload experiment is what exercises rejection
+PROD_SWEEP = (1, 32, 64, 128, 256, 512, 1024)
+PROD_REQUESTS = {   # requests per sweep point; the 7B sweep alone is 10,280 requests. 14B is scaled down but gives every client a request.
+    "7b": {1: 40, 32: 1500, 64: 1500, 128: 1500, 256: 2000, 512: 2000, 1024: 2000},
+    "14b": {1: 16, 32: 240, 64: 240, 128: 256, 256: 256, 512: 512, 1024: 1024}}
+PROD_LADDER = {"7b": (1, 2, 3, 4, 6, 8, 12, 16, 24, 32), "14b": (0.5, 1, 2, 3, 4, 6, 8)}
+PROD_LADDER_REQUESTS = {"7b": 240, "14b": 80}
+PROD_CAP_FACTOR = 1.5         # production experiments are capped at 1.5x their estimate (the older stages use 2.5x)
+CMP_REPEATS = 3               # the vLLM comparison needs at least three measured repetitions per key configuration
+CMP_POINTS = ((1, 24), (8, 64), (32, 128))   # (clients, requests), SHORT workload: identical in serial, batched and vLLM stages
+CMP_MIXED = (128, 384)        # (clients, requests), MIXED workload: batching engines only
 
 
 def sweep_requests(concurrency):
@@ -165,23 +178,48 @@ STAGES = {
                      "dtype": "bfloat16", "max_prompt_tokens": 1024, "batch_size": 48, "queue_size": 192},
     "vllm-14b-nf4": {"model": "14b", "engine": "vllm", "execution": "batch", "quantization": "nf4",
                      "dtype": "bfloat16", "max_prompt_tokens": 1024, "batch_size": 28, "queue_size": 192},
+    # ----- production-scale evaluation (docs/v10-production-evaluation.md) -----
+    # The A/B gate for packed prefill: the quick-batch workloads again with packing on, in the same Pod as 0.5b-quick-batch.
+    "0.5b-quick-batch-packed": {"invariance": True, "model": "0.5b", "engine": "tensorpilot", "execution": "batch",
+                                "quantization": "none", "dtype": "float16", "max_prompt_tokens": 1024, "batch_size": 128,
+                                "queue_size": 256, "prefill_pack": PREFILL_PACK_TOKENS, "backlog": 2048},
+    # Queue 1,100 admits every one of 1,024 clients, so the sweep measures latency and throughput at that concurrency rather
+    # than how fast clients are turned away; the bounded-queue behaviour is the separate `overload` experiment.
+    "7b-bf16-prod-serial": {"model": "7b", "engine": "tensorpilot", "execution": "serial", "quantization": "none",
+                            "dtype": "bfloat16", "max_prompt_tokens": 1024, "batch_size": 1, "queue_size": 64},
+    "7b-bf16-prod": {"invariance": True, "model": "7b", "engine": "tensorpilot", "execution": "batch",
+                     "quantization": "none", "dtype": "bfloat16", "max_prompt_tokens": 1024, "batch_size": 48,
+                     "queue_size": PROD_QUEUE, "prefill_pack": PREFILL_PACK_TOKENS, "backlog": 2048},
+    "14b-nf4-prod": {"invariance": True, "model": "14b", "engine": "tensorpilot", "execution": "batch",
+                     "quantization": "nf4", "dtype": "bfloat16", "max_prompt_tokens": 1024, "batch_size": 28,
+                     "queue_size": PROD_QUEUE, "prefill_pack": PREFILL_PACK_TOKENS, "backlog": 2048},
+    "vllm-7b-bf16-prod": {"model": "7b", "engine": "vllm", "execution": "batch", "quantization": "none",
+                          "dtype": "bfloat16", "max_prompt_tokens": 1024, "batch_size": 48, "queue_size": PROD_QUEUE},
+    "vllm-14b-nf4-prod": {"model": "14b", "engine": "vllm", "execution": "batch", "quantization": "nf4",
+                          "dtype": "bfloat16", "max_prompt_tokens": 1024, "batch_size": 28, "queue_size": PROD_QUEUE},
 }
 
 
 # Stages that are not gpu_bench experiment files but run under the same cap, ledger and evidence rules.
 EXTRA_STAGES = {
     "quality-7b": {"model": "7b", "engine": "quality", "quantization": "none", "dtype": "bfloat16",
-                   "expected_minutes": 14, "cap_minutes": 40,
+                   "expected_minutes": 14, "cap_minutes": 30,
                    "what": "7B bf16 reference capture, then NF4 capture against it, then the comparison"},
     "quality-14b": {"model": "14b", "engine": "quality", "quantization": "nf4", "dtype": "bfloat16",
-                    "expected_minutes": 12, "cap_minutes": 45,
+                    "expected_minutes": 12, "cap_minutes": 30,
                     "what": "14B NF4 capture: absolute metrics only, there is no bf16 reference on 24 GB"},
     "faults-0.5b": {"model": "0.5b", "engine": "faults", "quantization": "none", "dtype": "float16",
                     "expected_minutes": 5, "cap_minutes": 20, "rate": 10, "requests": 300, "kill_after": 12,
                     "what": "SIGKILL the worker under load and audit request accounting (fast restart)"},
     "faults-7b": {"model": "7b", "engine": "faults", "quantization": "none", "dtype": "bfloat16",
-                  "expected_minutes": 12, "cap_minutes": 50, "rate": 5, "requests": 900, "kill_after": 25,
+                  "expected_minutes": 12, "cap_minutes": 30, "rate": 5, "requests": 900, "kill_after": 25,
                   "what": "the same crash experiment with a 7B reload in the recovery path"},
+    "probe-0.5b": {"model": "0.5b", "engine": "probe", "quantization": "none", "dtype": "float16", "prefill_pack": 2048,
+                   "expected_minutes": 3, "cap_minutes": 12,
+                   "what": "explain solo-vs-batched divergence with the model's own top-2 logits (the 31/32 quick-session case)"},
+    "probe-7b": {"model": "7b", "engine": "probe", "quantization": "none", "dtype": "bfloat16", "prefill_pack": 2048,
+                 "expected_minutes": 6, "cap_minutes": 20,
+                 "what": "the same logit-margin explanation for bf16 7B: is every divergence a rounding-level near-tie?"},
 }
 # The batch-invariance check (tensorpilot.batch_invariance) runs before the benchmark in the batching stages.
 INVARIANCE_CAP_MINUTES = 10
@@ -189,6 +227,86 @@ INVARIANCE_EXPECTED_MINUTES = 3
 READY_TIMEOUT_S = {"0.5b": 900, "7b": 1800, "14b": 3600}
 DOWNLOAD_GIB = {"0.5b": 0.92, "7b": 14.19, "14b": 27.51}
 SPECS = {"short": SHORT, "mixed": MIXED, "cancel": CANCEL, "timeouts": TIMEOUTS}
+
+
+# ----- the budget model ------------------------------------------------------------------------------------------
+# The production evaluation runs in three Pods. Each session's SESSION_BUDGET_MINUTES is a ledger bound on stage time
+# (a stage is refused if the time already used plus its hard cap exceeds it); boot, downloads, model loads and export are
+# outside the ledger, so they are added as an assumed overhead plus slack. Price is an ASSUMPTION until you rent the card.
+BUDGET_USD = 9.0
+ASSUMED_PRICE_PER_HOUR = 0.90
+SLACK_MINUTES = 15
+SESSIONS = {
+    "gate": {"stages": ["0.5b-quick-batch", "0.5b-quick-batch-packed", "probe-0.5b"], "overhead_minutes": 25,
+             "purpose": "does packed prefill help or hurt, and is every solo-vs-batched divergence a rounding-level near-tie?"},
+    "7b": {"stages": ["probe-7b", "7b-bf16-prod-serial", "7b-bf16-prod", "faults-7b", "quality-7b", "vllm-7b-bf16-prod"],
+           "overhead_minutes": 75, "purpose": "7B bf16: serial baseline, scale sweep, reliability, crash recovery, vLLM"},
+    "14b": {"stages": ["14b-nf4-prod", "quality-14b"], "overhead_minutes": 83,
+            "purpose": "14B NF4: load, generate, scale sweep, fidelity"},
+}
+# Not counted against the $9: only if credits remain after the core sessions. A fresh Pod re-downloads 28 GB and reinstalls vLLM.
+OPTIONAL_SESSIONS = {
+    "14b-vllm": {"stages": ["vllm-14b-nf4-prod"], "overhead_minutes": 55,
+                 "purpose": "vLLM on the same 14B NF4 workloads (a different Pod from the TensorPilot 14B run)"},
+}
+
+
+def _stage_minutes(stage):
+    env = stage_env(stage)
+    return env["V10_EXPECTED_MINUTES"], env["V10_CAP_MINUTES"]
+
+
+def budget_plan(price_per_hour=ASSUMED_PRICE_PER_HOUR, budget_usd=BUDGET_USD, sessions=None):
+    """Expected and worst-case cost per session, the SESSION_BUDGET_MINUTES that enforces it, and whether it fits.
+
+    Worst case for a session = its stage-time budget + assumed overhead + slack, because the ledger refuses any stage that
+    would take the used time past the budget. The budgets are the expected stage time plus headroom for ONE stage running to
+    its cap, scaled down together if the sum of worst cases would exceed the money.
+    """
+    sessions = SESSIONS if sessions is None else sessions
+    per_minute = price_per_hour / 60
+    allowed_minutes = budget_usd / per_minute
+    rows = {}
+    for name, session in sessions.items():
+        mins = [_stage_minutes(stage) for stage in session["stages"]]
+        expected = sum(m[0] for m in mins)
+        caps = [m[1] for m in mins]
+        rows[name] = {"stages": list(session["stages"]), "expected_stage_minutes": round(expected, 1),
+                      "stage_caps": caps, "overhead_minutes": session["overhead_minutes"], "slack_minutes": SLACK_MINUTES,
+                      "wanted_budget_minutes": math.ceil(max(sum(m[0] for m in mins[:i]) + caps[i]
+                                                             for i in range(len(caps)))),
+                      "purpose": session["purpose"]}
+    wanted_worst = sum(r["wanted_budget_minutes"] + r["overhead_minutes"] + r["slack_minutes"] for r in rows.values())
+    # Scale the stage-time budgets so that the sum of worst cases is the money, if the wanted budgets would overspend.
+    free = allowed_minutes - sum(r["overhead_minutes"] + r["slack_minutes"] for r in rows.values())
+    wanted_stage = sum(r["wanted_budget_minutes"] for r in rows.values())
+    scale = min(1.0, free / wanted_stage) if free > 0 else 0.0
+    total_expected = total_worst = 0.0
+    for r in rows.values():
+        r["session_budget_minutes"] = math.floor(r["wanted_budget_minutes"] * scale)
+        used, refused = 0.0, None
+        for stage, cap, minutes in zip(r["stages"], r["stage_caps"], (_stage_minutes(x)[0] for x in r["stages"])):
+            if used + cap > r["session_budget_minutes"]:
+                refused = stage
+                break
+            used += minutes
+        r["ledger_refuses_on_the_expected_path"] = refused
+        r["expected_total_minutes"] = round(r["expected_stage_minutes"] + r["overhead_minutes"], 1)
+        r["worst_total_minutes"] = r["session_budget_minutes"] + r["overhead_minutes"] + r["slack_minutes"]
+        r["expected_cost_usd"] = round(r["expected_total_minutes"] * per_minute, 2)
+        r["worst_cost_usd"] = round(r["worst_total_minutes"] * per_minute, 2)
+        total_expected += r["expected_cost_usd"]
+        total_worst += r["worst_cost_usd"]
+    return {"price_per_hour_usd": price_per_hour, "price_is_assumption": True, "budget_usd": budget_usd,
+            "wanted_worst_case_usd": round(wanted_worst * per_minute, 2), "scaled_to_fit": scale < 1.0,
+            "sessions": rows, "optional_sessions": {name: {"stages": o["stages"], "purpose": o["purpose"],
+                                                            "expected_stage_minutes": round(sum(_stage_minutes(x)[0] for x in o["stages"]), 1),
+                                                            "worst_cost_usd": round((sum(_stage_minutes(x)[1] for x in o["stages"])
+                                                                                     + o["overhead_minutes"] + SLACK_MINUTES) * per_minute, 2)}
+                                                    for name, o in OPTIONAL_SESSIONS.items()},
+            "expected_total_usd": round(total_expected, 2), "worst_total_usd": round(total_worst, 2),
+            "fits_budget_worst_case": total_worst <= budget_usd + 1e-6,
+            "every_expected_stage_can_start": all(r["ledger_refuses_on_the_expected_path"] is None for r in rows.values())}
 
 
 def all_stage_names():
@@ -205,13 +323,16 @@ def stage_env(stage):
                "V10_CAP_MINUTES": config["max_session_minutes"] - 5 + (INVARIANCE_CAP_MINUTES if s.get("invariance") else 0),
                "V10_EXPECTED_MINUTES": round(config["expected_experiment_minutes"]
                                              + (INVARIANCE_EXPECTED_MINUTES if s.get("invariance") else 0), 1),
-               "V10_INVARIANCE": 1 if s.get("invariance") else 0}
+               "V10_INVARIANCE": 1 if s.get("invariance") else 0,
+               "V10_PREFILL_PACK": s.get("prefill_pack", 0), "V10_BACKLOG": s.get("backlog", 128)}
     elif stage in EXTRA_STAGES:
         s = EXTRA_STAGES[stage]
         env = {"V10_ENGINE": s["engine"], "V10_EXECUTION": "batch", "V10_QUANT": s["quantization"],
                "V10_DTYPE": s["dtype"], "V10_BATCH_SIZE": 32, "V10_QUEUE_SIZE": 128, "V10_MAX_PROMPT_TOKENS": 1024,
                "V10_CONFIG": "", "V10_CAP_MINUTES": s["cap_minutes"], "V10_EXPECTED_MINUTES": s["expected_minutes"],
                "V10_WHAT": s["what"]}
+        env["V10_PREFILL_PACK"] = s.get("prefill_pack", 0)
+        env["V10_BACKLOG"] = 128
         for key in ("rate", "requests", "kill_after"):
             if key in s:
                 env[f"V10_FAULT_{key.upper()}"] = s[key]
@@ -246,13 +367,63 @@ def quick_experiments(stage, cold):
     return items
 
 
+def prod_experiments(stage, cold):
+    """The production-scale experiments. Ids are shared across engines so the report and the acceptance checks can pair them.
+
+    The 7B stages carry the full set (sweep to 1,024 clients, ladder, sustained run, cancellation, timeouts, overload). The 14B
+    stage is a leaner set of the same measurements: the safety experiments exercise engine code that does not depend on the
+    model, so repeating them at 14B would spend the budget on the same code path.
+    """
+    s = STAGES[stage]
+    model, execution, engine = s["model"], s["execution"], s["engine"]
+    lean = model == "14b"
+    cap = PROD_CAP_FACTOR
+    items = [cold]
+    for clients, requests in CMP_POINTS:
+        items.append(closed(model, execution, f"cmp-c{clients}", clients, requests, SHORT, repeats=CMP_REPEATS, warmup=2,
+                            cap_factor=cap,
+                            description=f"comparison point: {clients} clients, short prompts, identical in every engine's stage"))
+    if execution == "serial":
+        return items
+    clients, requests = CMP_MIXED
+    items.append(closed(model, execution, f"cmp-c{clients}", clients, requests, MIXED, repeats=CMP_REPEATS, warmup=2,
+                        cap_factor=cap,
+                        description=f"comparison point: {clients} clients, mixed lengths, identical in every batching stage"))
+    counts = PROD_REQUESTS[model]
+    for clients in PROD_SWEEP:
+        items.append(closed(model, execution, f"scale-c{clients}", clients, counts[clients], MIXED,
+                            repeats=2 if clients == 1 else 1, abort_error_rate=0.9, cap_factor=cap,
+                            description=f"{clients} concurrent clients, mixed lengths, {counts[clients]} requests: scale sweep"))
+    items.append(ladder(model, execution, "ladder-poisson", PROD_LADDER[model], PROD_LADDER_REQUESTS[model], MIXED,
+                        concurrency=1024, abort_error_rate=0.5, cap_factor=cap,
+                        description="Poisson arrivals at rising rates until saturation: the maximum sustainable rate"))
+    items.append(closed(model, execution, "sustained-c32", 32, 800 if lean else 3000, MIXED, abort_error_rate=0.2,
+                        cap_factor=cap,
+                        description="a long steady run at a concurrency the slots can serve: sustained-load reliability"))
+    if engine == "tensorpilot" and not lean:
+        items.append(closed(model, execution, "cancellation", 32, 320, CANCEL, abort_error_rate=0.5, cap_factor=cap,
+                            description="30% of clients abandon their request, while queued or while decoding"))
+        items.append(closed(model, execution, "timeouts", 32, 240, TIMEOUTS, abort_error_rate=1.0, cap_factor=cap,
+                            description="tight per-request deadlines: expiry, cleanup and accounting under pressure"))
+        items.append(ladder(model, execution, "overload", (400,), 1500, SHORT, abort_error_rate=1.0, slo=False,
+                            timeout_s=30, concurrency=1024, cap_factor=cap,
+                            description="arrivals far above capacity: a bounded queue, rejections, and recovery"))
+        items.append(closed(model, execution, "recovery-after-overload", 8, 64, SHORT, slo=False, warmup=0, cap_factor=cap,
+                            description="the same worker right after overload: it must serve normally again"))
+    return items
+
+
 def experiments_for(stage):
     s = STAGES[stage]
     model, execution = s["model"], s["execution"]
     cold = closed(model, execution, "cold-start", 1, 8, SHORT, warmup=0, slo=False, abort_error_rate=0.5,
                   description="the first requests after readiness, before any warmup request: cold-start latency")
-    if "-quick-" in stage:
+    if "-quick-" in stage and not stage.endswith("-packed"):
         return quick_experiments(stage, cold)
+    if stage == "0.5b-quick-batch-packed":
+        return quick_experiments("0.5b-quick-batch", cold)
+    if stage.endswith("-prod") or stage.endswith("-prod-serial"):
+        return prod_experiments(stage, cold)
     if stage == "0.5b-serial":
         legacy = {"prompt_tokens": 17, "output_tokens": 32}
         regression = spec(10, [{"name": "regression", "prompt_tokens": legacy["prompt_tokens"],
@@ -348,10 +519,16 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--write", metavar="DIR", help="write benchmarks/gpu/v10-<stage>.json for every stage")
     parser.add_argument("--plan", action="store_true", help="print expected and capped experiment minutes")
+    parser.add_argument("--budget", action="store_true", help="print the session budgets and costs (JSON)")
+    parser.add_argument("--price-per-hour", type=float, default=ASSUMED_PRICE_PER_HOUR, help="your Pod's real hourly price")
+    parser.add_argument("--budget-usd", type=float, default=BUDGET_USD)
     parser.add_argument("--list-stages", action="store_true", help="print stage names, one per line")
     parser.add_argument("--stage-env", metavar="STAGE", help="print the stage's settings as shell exports")
     parser.add_argument("--dump-spec", metavar="NAME", choices=sorted(SPECS), help="print a named workload spec as JSON")
     args = parser.parse_args()
+    if args.budget:
+        print(json.dumps(budget_plan(args.price_per_hour, args.budget_usd), indent=2))
+        return 0
     if args.list_stages:
         print("\n".join(all_stage_names()))
         return 0

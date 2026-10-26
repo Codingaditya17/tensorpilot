@@ -83,3 +83,11 @@ def test_a_missing_quantization_stack_stops_the_worker_before_any_model_is_loade
     message = parse_error(monkeypatch, capsys, "--backend", "cuda", "--model", "org/model",
                           "--quantization", "nf4", "--dtype", "bfloat16")
     assert "no fallback" in message
+
+
+def test_packing_and_backlog_arguments_are_bounded(monkeypatch, capsys):
+    assert "prefill-pack-tokens" in parse_error(monkeypatch, capsys, "--backend", "cuda", "--model", "org/model",
+                                                "--execution", "batch", "--prefill-pack-tokens", "-1")
+    assert "prefill-pack-tokens" in parse_error(monkeypatch, capsys, "--backend", "cuda", "--model", "org/model",
+                                                "--execution", "batch", "--prefill-pack-tokens", "16385")
+    assert "backlog" in parse_error(monkeypatch, capsys, "--backend", "cuda", "--model", "org/model", "--backlog", "0")

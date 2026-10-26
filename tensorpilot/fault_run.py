@@ -210,6 +210,8 @@ async def run_fault_experiment(*, worker_command, url, api_key, output_dir, plan
             kill_offset = kill["at_perf_s"] - t0
             restored = next((e["offset_s"] for e in timeline if e["state"] == "ready" and e["offset_s"] > kill_offset),
                             None)
+            kill["offset_s"] = kill_offset
+            kill["recovery_s"] = restored - kill_offset if restored is not None else None   # kill to /readyz, on the load clock
             checks.append(check("worker_was_killed", bool(kill), f"SIGKILL sent to pid {kill.get('pid')}",
                                 pid=kill.get("pid"), first_pid=first_pid))
             checks.append(check("supervisor_restarted_the_worker_with_a_new_process",

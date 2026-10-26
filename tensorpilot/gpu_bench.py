@@ -140,7 +140,7 @@ def _validate_experiment(experiment):
         return
     if experiment.get("status") not in (None, "runnable"):
         raise ValueError(f"{identifier}: runnable experiments may not declare status {experiment['status']}")
-    checks = {"requests": (1, 20000), "concurrency": (1, 256), "prompt_repeats": (1, 256),
+    checks = {"requests": (1, 20000), "concurrency": (1, 1024), "prompt_repeats": (1, 256),
               "max_tokens": (1, 512), "repeats": (1, 10), "warmup_requests": (0, 50),
               "timeout_s": (1, 120), "max_minutes": (1, 240)}
     if "abort_error_rate" in experiment:
@@ -179,9 +179,9 @@ def _validate_experiment(experiment):
         raise ValueError(f"{identifier}: telemetry must be true or false")
     if kind == "open_loop" or kind == "saturation":
         rates = experiment.get("rates")
-        if not isinstance(rates, list) or not rates or len(rates) > 8 or not all(
+        if not isinstance(rates, list) or not rates or len(rates) > 12 or not all(
                 _positive_number(rate) and rate <= 1000 for rate in rates):
-            raise ValueError(f"{identifier}: rates must be 1..8 positive numbers up to 1000 per second")
+            raise ValueError(f"{identifier}: rates must be 1..12 positive numbers up to 1000 per second")
     elif "rates" in experiment:
         raise ValueError(f"{identifier}: rates is only valid for open_loop and saturation")
 

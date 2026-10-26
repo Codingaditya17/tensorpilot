@@ -172,8 +172,9 @@ def test_the_telemetry_overhead_pair_is_identical_except_for_the_sampler():
 
 
 def test_budgets_are_stated_with_caps_far_above_expectations_but_bounded():
-    total_expected = sum(c["expected_experiment_minutes"] for c in CONFIGS.values())
-    total_cap = sum(c["max_session_minutes"] - 5 for c in CONFIGS.values())
+    legacy = {name: c for name, c in CONFIGS.items() if "-prod" not in name and not name.endswith("-packed")}
+    total_expected = sum(c["expected_experiment_minutes"] for c in legacy.values())
+    total_cap = sum(c["max_session_minutes"] - 5 for c in legacy.values())
     assert 200 < total_expected < 400 and total_expected < total_cap
     assert "TOTAL" in suite.plan_text()
 

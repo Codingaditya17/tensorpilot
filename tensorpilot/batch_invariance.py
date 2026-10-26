@@ -79,6 +79,7 @@ def compare_runs(reference, other):
         same = a == b
         exact += same
         rows.append({"index": index, "comparable": True, "exact": same, "solo_tokens": len(a), "test_tokens": len(b),
+                     "solo_token_ids": None if same else a, "test_token_ids": None if same else b,
                      "first_divergence": None if same else shared,
                      "prefix_fraction": shared / max(len(a), len(b), 1)})
     comparable = [r for r in rows if r["comparable"]]
@@ -92,7 +93,9 @@ def compare_runs(reference, other):
             "median_divergence": (sorted(r["first_divergence"] for r in diverged)[len(diverged) // 2]
                                   if diverged else None),
             "not_comparable": len(rows) - len(comparable),
-            "diverged_requests": [{k: r[k] for k in ("index", "first_divergence", "solo_tokens", "test_tokens")}
+            # The token ids of a diverged request are kept so it can be examined later (divergence_probe) without a rerun.
+            "diverged_requests": [{k: r[k] for k in ("index", "first_divergence", "solo_tokens", "test_tokens",
+                                                     "solo_token_ids", "test_token_ids")}
                                   for r in diverged][:20]}
 
 
@@ -104,7 +107,8 @@ async def measure(url, *, prompts=32, timeout=120, head_start_s=0.3, workdir=Non
     solo, solo_summary = await _pass(url, plan, path, 1, timeout)
     together, together_summary = await _pass(url, plan, path, prompts, timeout)
     staggered = await _staggered(url, plan, path, timeout, head_start_s)
-    return {"schema": SCHEMA, "at_utc": datetime.now(timezone.utc).isoformat(), "url": "(loopback worker)",
+    classes = {i: item["class"] for i, item in enumerate(plan)}
+    report = {"schema": SCHEMA, "at_utc": datetime.now(timezone.utc).isoformat(), "url": "(loopback worker)",
             "prompts": prompts,
             "plan_classes": {item["class"]: sum(other["class"] == item["class"] for other in plan) for item in plan},
             "solo_summary": {k: solo_summary[k] for k in ("successful_requests", "failed_requests")},
@@ -115,6 +119,10 @@ async def measure(url, *, prompts=32, timeout=120, head_start_s=0.3, workdir=Non
                               "or token-count differences, indicate a real defect",
                               "bf16/fp16 batching changes reduction order, so some divergence on a GPU is expected and is "
                               "measured here rather than assumed away"]}
+    for name in ("together_vs_solo", "staggered_vs_solo"):
+        for row in report[name]["diverged_requests"]:
+            row["class"], row["prompt_tokens"] = classes[row["index"]], plan[row["index"]].get("prompt_tokens")
+    return report
 
 
 def main():

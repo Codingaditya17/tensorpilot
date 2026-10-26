@@ -27,9 +27,11 @@ STAGE_DIR = re.compile(r"^(?P<stage>.+)-(?P<stamp>\d{8}T\d{6}Z)$")
 ENGINE_COLORS = {"tensorpilot-batch": 1, "tensorpilot-serial": 2, "vllm": 3}
 MODEL_COLORS = {"0.5b": 1, "7b": 2, "14b": 3}
 OBJECTIVE = {"attainment": 0.95, "error_rate": 0.01}
-PAIRS_ENGINE = (("7b-bf16-batch", "vllm-7b-bf16"), ("14b-nf4-batch", "vllm-14b-nf4"))
+PAIRS_ENGINE = (("7b-bf16-batch", "vllm-7b-bf16"), ("14b-nf4-batch", "vllm-14b-nf4"),
+                ("7b-bf16-prod", "vllm-7b-bf16-prod"), ("14b-nf4-prod", "vllm-14b-nf4-prod"))
 PAIRS_SERIAL = (("0.5b-serial", "0.5b-batch", {"serial-c8": "sweep-c8", "regression-c1": "sweep-c1"}),
-                ("7b-bf16-serial", "7b-bf16-batch", {"serial-c8": "sweep-c8", "serial-c1": "sweep-c1"}))
+                ("7b-bf16-serial", "7b-bf16-batch", {"serial-c8": "sweep-c8", "serial-c1": "sweep-c1"}),
+                ("7b-bf16-prod-serial", "7b-bf16-prod", {"cmp-c1": "cmp-c1", "cmp-c8": "cmp-c8", "cmp-c32": "cmp-c32"}))
 
 SVG_STYLE = ("<style>:root{--surface:#fcfcfb;--text:#0b0b0b;--muted:#52514e;--grid:#e3e2de;--s1:#2a78d6;--s2:#eb6834;"
              "--s3:#1baf7a}@media (prefers-color-scheme: dark){:root{--surface:#1a1a19;--text:#f0efec;--muted:#c3c2b7;"
@@ -109,7 +111,7 @@ def nested(reports, *path):
 def sweep_rows(stage):
     rows = []
     for name, reports in stage["reports"].items():
-        match = re.fullmatch(r"sweep-c(\d+)", name)
+        match = re.fullmatch(r"(?:sweep|scale)-c(\d+)", name)
         if match and reports:
             rows.append((int(match[1]), reports))
     rows.sort()
@@ -136,6 +138,55 @@ def sweep_rows(stage):
                     "batch_width_mean": nested(reports, "telemetry", "active_sequences", "mean"),
                     "decode_tok_s": spread([r.get("telemetry", {}).get("active_decode_tokens_per_s") for r in reports])})
     return out
+
+
+def _read_jsonl(path):
+    rows = []
+    try:
+        for line in Path(path).read_text().splitlines():
+            try:
+                rows.append(json.loads(line))
+            except ValueError:
+                continue
+    except OSError:
+        pass
+    return rows
+
+
+def profile_rows(stage):
+    """Per experiment, from the worker's own counters and the GPU samples: where the time goes.
+
+    ``ms/decode step`` flat while ``tokens/step`` grows, with low GPU utilization, is the signature of a step bound by
+    launch and host overhead rather than by the GPU's arithmetic or memory bandwidth.
+    """
+    rows = []
+    bench = stage["dir"] / "bench"
+    for name in stage["reports"]:
+        server = _read_jsonl(bench / name / "telemetry" / "server.jsonl")
+        gpu = _read_jsonl(bench / name / "telemetry" / "gpu.jsonl")
+        # The serial worker reports these counters as null: there is no batch step to profile.
+        if len(server) < 2 or any(server[i].get(k) is None for i in (0, -1)
+                                  for k in ("decode_steps", "decode_tokens", "decode_execution_s")):
+            continue
+        a, b = server[0], server[-1]
+        steps, tokens = b["decode_steps"] - a["decode_steps"], b["decode_tokens"] - a["decode_tokens"]
+        chunks = b.get("prefill_chunks", 0) - a.get("prefill_chunks", 0)
+        decode_s = b["decode_execution_s"] - a["decode_execution_s"]
+        prefill_s = b.get("prefill_execution_s", 0) - a.get("prefill_execution_s", 0)
+        wall = b["t"] - a["t"]
+        util = [g["util_gpu_pct"] for g in gpu if g.get("util_gpu_pct") is not None]
+        power = [g["power_w"] for g in gpu if g.get("power_w") is not None]
+        rows.append({"experiment": name, "wall_s": wall, "decode_steps": steps,
+                     "tokens_per_step": tokens / steps if steps else None,
+                     "ms_per_decode_step": 1000 * decode_s / steps if steps else None,
+                     "ms_per_prefill_chunk": 1000 * prefill_s / chunks if chunks else None,
+                     "engine_busy": (decode_s + prefill_s) / wall if wall > 0 else None,
+                     "prefill_share": prefill_s / (decode_s + prefill_s) if decode_s + prefill_s > 0 else None,
+                     "gpu_util_mean": statistics.fmean(util) if util else None,
+                     "power_mean_w": statistics.fmean(power) if power else None,
+                     "max_queue": max(s.get("queue_depth") or 0 for s in server),
+                     "max_active": max(s.get("active_sequences") or 0 for s in server)})
+    return sorted(rows, key=lambda r: r["experiment"])
 
 
 def ladder_rows(stage, name="ladder-poisson"):
@@ -285,7 +336,7 @@ def experiment_status(stage_name, evidence):
 
 # ----- the report -------------------------------------------------------------------------------------------
 
-def build(session, output, baseline=None):
+def build(session, output, baseline=None, acceptance=None):
     output = Path(output)
     charts = output / "charts"
     charts.mkdir(parents=True, exist_ok=True)
@@ -299,6 +350,14 @@ def build(session, output, baseline=None):
         (output / "report.md").write_text("\n".join(md))
         return {"stages": 0, "charts": 0}
     made = 0
+
+    if acceptance:
+        verdict = json.loads(Path(acceptance).read_text())
+        md += [f"## Acceptance: evaluation {verdict['evaluation']}, performance targets {verdict['performance']}", "",
+               verdict["rule"], ""]
+        md += table(["#", "criterion", "group", "verdict", "evidence"],
+                    [(r["criterion"], r["title"], r["category"], r["status"], r["detail"].replace("|", "/"))
+                     for r in verdict["items"]]) + [""]
 
     md += ["## Provenance", ""]
     rows = []
@@ -352,6 +411,21 @@ def build(session, output, baseline=None):
                           y_label=label, series=series, note="hollow marker = fewer than 100 completed requests"):
                 md += [f"![{label}, {name}](charts/{file}-{name}.svg)", ""]
                 made += 1
+
+    # where the time goes
+    for name, ev in sorted(stages.items()):
+        rows = profile_rows(ev)
+        if rows:
+            md += [f"## Engine profile: {name}", "",
+                   "From the worker's synchronized step counters and the GPU samples, per experiment. A decode-step time that "
+                   "stays flat as tokens per step grow, with low GPU utilization, means the step is bound by launch and host "
+                   "overhead, not by the GPU; prefill share is the fraction of engine time spent in prompt processing.", ""]
+            md += table(["experiment", "tokens/step", "ms/decode step", "ms/prefill chunk", "engine busy", "prefill share",
+                         "GPU util %", "power W", "max queue", "max active"],
+                        [(r["experiment"], fmt(r["tokens_per_step"], 2), fmt(r["ms_per_decode_step"], 1),
+                          fmt(r["ms_per_prefill_chunk"], 1), fmt(r["engine_busy"], 2), fmt(r["prefill_share"], 2),
+                          fmt(r["gpu_util_mean"], 0), fmt(r["power_mean_w"], 0), r["max_queue"], r["max_active"])
+                         for r in rows]) + [""]
 
     # ladders
     for name, ev in sorted(stages.items()):
@@ -425,7 +499,8 @@ def build(session, output, baseline=None):
                               note="same workload, same card, run one after the other"):
                     md += [f"![{label}, {ours} vs vLLM](charts/{file}-{ours}.svg)", ""]
                     made += 1
-            mismatch = ((stages[theirs]["reports"] or {}).get("sweep-c1") or [{}])[0].get("limitations")
+            reports_of = stages[theirs]["reports"] or {}
+            mismatch = ((reports_of.get("sweep-c1") or reports_of.get("scale-c1") or [{}]))[0].get("limitations")
             if mismatch:
                 md += ["Comparability notes recorded by the vLLM run:", ""] + [f"- {line}" for line in mismatch] + [""]
 
@@ -556,8 +631,9 @@ def main():
     parser.add_argument("session", help="directory of stage evidence and the ledger")
     parser.add_argument("--output", required=True)
     parser.add_argument("--baseline", help="the immutable baseline directory to compare against")
+    parser.add_argument("--acceptance", help="verdict.json from tensorpilot.acceptance, embedded at the top of the report")
     args = parser.parse_args()
-    result = build(args.session, args.output, args.baseline)
+    result = build(args.session, args.output, args.baseline, args.acceptance)
     print(f"report: {Path(args.output) / 'report.md'} ({result['stages']} stage(s), {result['charts']} chart(s))")
     return 0
 

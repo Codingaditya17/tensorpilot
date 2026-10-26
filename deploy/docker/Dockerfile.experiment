@@ -38,7 +38,8 @@ RUN python -m pip install --no-deps --no-cache-dir --force-reinstall /tmp/tensor
 COPY deploy/runpod /opt/tensorpilot/deploy/runpod
 COPY requirements-vllm.txt /opt/tensorpilot/requirements-vllm.txt
 COPY benchmarks/gpu /opt/tensorpilot/benchmarks/gpu
-COPY docs/v09-runpod-runbook.md docs/v09-runpod-experiment-pod.md docs/v10-runbook.md docs/v10-evaluation-plan.md /opt/tensorpilot/docs/
+COPY benchmarks/acceptance /opt/tensorpilot/benchmarks/acceptance
+COPY docs/v09-runpod-runbook.md docs/v09-runpod-experiment-pod.md docs/v10-runbook.md docs/v10-evaluation-plan.md docs/v10-production-evaluation.md /opt/tensorpilot/docs/
 COPY deploy/runpod/pod_sshd_config /etc/ssh/sshd_config
 RUN chmod 0755 /opt/tensorpilot/deploy/runpod/*.sh && chmod 0644 /etc/ssh/sshd_config
 
@@ -59,7 +60,10 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD ["bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/22"]
 
 ARG SOURCE_SHA=unknown
+ARG IMAGE_TAG=unknown
 LABEL org.opencontainers.image.revision=$SOURCE_SHA
+# Readable from inside the Pod: stage-info.json copies it into every stage's evidence.
+RUN printf '{"source_sha": "%s", "image_tag": "%s"}\n' "$SOURCE_SHA" "$IMAGE_TAG" > /opt/tensorpilot/BUILD_INFO.json
 
 ENTRYPOINT ["/opt/tensorpilot/deploy/runpod/pod-entrypoint.sh"]
 STOPSIGNAL SIGTERM

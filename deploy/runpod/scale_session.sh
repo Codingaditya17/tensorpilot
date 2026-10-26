@@ -42,6 +42,12 @@ load_stage() {
   local exports
   exports="$(python3 -m tensorpilot.suite --stage-env "$1")" || return 2
   eval "$exports"
+  # An operator override for the A/B gate: PREFILL_PACK_TOKENS=0 runs the unpacked prefill path whatever the stage says.
+  if [[ -n "${PREFILL_PACK_TOKENS:-}" ]]; then
+    [[ "$PREFILL_PACK_TOKENS" =~ ^[0-9]+$ ]] && (( PREFILL_PACK_TOKENS <= 16384 )) ||
+      { echo "PREFILL_PACK_TOKENS must be an integer in 0..16384" >&2; return 2; }
+    V10_PREFILL_PACK="$PREFILL_PACK_TOKENS"
+  fi
   if [[ $TEST_MODE -eq 1 && -n "${V10_CAP_MINUTES_OVERRIDE:-}" ]]; then
     V10_CAP_MINUTES="$V10_CAP_MINUTES_OVERRIDE"
   fi
@@ -248,7 +254,8 @@ engine_command_tensorpilot() {  # prints the worker command, one word per line
   printf '%s\n' python3 -m tensorpilot.server --backend cuda --model "$V10_MODEL_REPO" --revision "$V10_REVISION" \
     --cache-dir "$CACHE" --host 127.0.0.1 --port "$PORT" --dtype "$V10_DTYPE" --quantization "$V10_QUANT" \
     --execution "$V10_EXECUTION" --batch-size "$V10_BATCH_SIZE" --queue-size "$V10_QUEUE_SIZE" \
-    --max-prompt-tokens "$V10_MAX_PROMPT_TOKENS" --max-output-tokens 512 --gpu-telemetry-interval 0
+    --max-prompt-tokens "$V10_MAX_PROMPT_TOKENS" --max-output-tokens 512 --gpu-telemetry-interval 0 \
+    --prefill-pack-tokens "${V10_PREFILL_PACK:-0}" --backlog "${V10_BACKLOG:-128}"
 }
 
 vllm_python() { echo "${VLLM_VENV:-/workspace/vllm-venv}/bin/python"; }
@@ -410,6 +417,15 @@ stage_quality() {
   fi
 }
 
+stage_probe() {
+  # Needs the GPU to itself: the probe loads the model in-process, so no worker may be running (the runner starts none for this stage).
+  log "divergence probe: solo vs batched logits for ${V10_PROBE_PROMPTS:-32} prompts (prefill pack $V10_PREFILL_PACK)"
+  run_guarded timeout --signal=TERM --kill-after=60 "${V10_CAP_MINUTES}m" python3 -m tensorpilot.divergence_probe \
+    --model "$V10_MODEL_REPO" --revision "$V10_REVISION" --cache-dir "$CACHE" --dtype "$V10_DTYPE" \
+    --quantization "$V10_QUANT" --prompts "${V10_PROBE_PROMPTS:-32}" --prefill-pack-tokens "${V10_PREFILL_PACK:-0}" \
+    --output "$STAGE_DIR/divergence-probe.json"
+}
+
 stage_faults() {
   python3 -m tensorpilot.suite --dump-spec short >"$STAGE_DIR/workload-spec.json"
   local -a command=(python3 -m tensorpilot.fault_run --port "$PORT" --url "http://127.0.0.1:$PORT"
@@ -452,9 +468,13 @@ if used + cap > budget:
 PY
   gpu_checks "$V10_ENGINE"
   pod_lifetime_check || exit 3
+  # 512 and 1,024 clients hold that many sockets in the client and again in the server; children inherit this limit.
+  ulimit -n 65535 2>/dev/null || log "WARNING: could not raise the open-file limit (now $(ulimit -n)); the 512/1024-client points may fail"
   skip_gpu || check_disk "$CACHE" "$V10_DOWNLOAD_GIB"
   STAGE_DIR="$SESSION/$stage-$(date -u +%Y%m%dT%H%M%SZ)"
   mkdir -p "$STAGE_DIR"
+  python3 -m tensorpilot.stage_info --stage "$stage" --output "$STAGE_DIR/stage-info.json" ||
+    log "WARNING: could not write stage-info.json (the same-GPU and image-identity checks will be inconclusive)"
   local started_epoch started_utc
   started_epoch="$(date +%s)"
   started_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -470,6 +490,7 @@ PY
   case "$V10_ENGINE" in
     tensorpilot|vllm) stage_benchmark "$V10_ENGINE" || STAGE_STATUS=$? ;;
     quality) stage_quality || STAGE_STATUS=$? ;;
+    probe) stage_probe || STAGE_STATUS=$? ;;
     faults) stage_faults || STAGE_STATUS=$? ;;
   esac
   STAGE_STATUS="${STAGE_STATUS:-0}"
@@ -526,6 +547,7 @@ stage:           $stage  ($V10_ENGINE)
 model:           $V10_MODEL_REPO @ $V10_REVISION
 precision:       dtype $V10_DTYPE, quantization $V10_QUANT, execution $V10_EXECUTION
 slots / queue:   $V10_BATCH_SIZE / $V10_QUEUE_SIZE   (the pool may grant fewer: see docs/v10-evaluation-plan.md)
+prefill packing: ${V10_PREFILL_PACK:-0} padded tokens per forward (0 = off), listen backlog ${V10_BACKLOG:-128}
 prompt limit:    $V10_MAX_PROMPT_TOKENS tokens
 config:          ${V10_CONFIG:-n/a}
 expected:        $V10_EXPECTED_MINUTES minutes of experiments (an assumption, not a measurement)

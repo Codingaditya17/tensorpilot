@@ -1,0 +1,81 @@
+{
+  "schema": "tensorpilot.acceptance-criteria/v1",
+  "declared_before_execution": true,
+  "note": "Thresholds are fixed here, in the repository, before any production-scale run. Changing one after seeing results must be a visible commit, never an edit to the verdict.",
+  "correctness": {
+    "protocol_valid_min": 0.999,
+    "bf16_exact_match_target": 1.0,
+    "bf16_divergence_ulp_tolerance": 4,
+    "nf4_vs_bf16_7b": {
+      "top1_agreement_min": 0.9,
+      "top5_overlap_min": 0.8,
+      "perplexity_ratio_max": 1.1
+    },
+    "nf4_14b_perplexity_ratio_vs_7b_bf16_max": 1.05
+  },
+  "scale": {
+    "concurrency_levels": [
+      1,
+      32,
+      64,
+      128,
+      256,
+      512,
+      1024
+    ],
+    "min_total_requests": 10000,
+    "stretch_total_requests": 100000,
+    "min_speedup_over_serial": 1.5,
+    "speedup_points": [
+      "cmp-c8",
+      "cmp-c32"
+    ],
+    "max_p95_client_dispatch_lag_s": 1.0
+  },
+  "reliability": {
+    "sustained_success_min": 0.999,
+    "min_requests_for_three_nines": 1000,
+    "sustained_experiment": "sustained-c32",
+    "max_cuda_oom_events": 0,
+    "recovery_max_s": 60,
+    "overload_leak_tolerance_mib": 64,
+    "post_overload_success_min": 0.999
+  },
+  "latency": {
+    "ttft_p95_s_max": 2.0,
+    "itl_p95_s_max": 0.15,
+    "slo_by_model": {
+      "7b": {
+        "ttft_s": 2.0,
+        "e2e_s": 20.0,
+        "tpot_s": 0.15
+      },
+      "14b": {
+        "ttft_s": 4.0,
+        "e2e_s": 40.0,
+        "tpot_s": 0.35
+      }
+    },
+    "objective": {
+      "attainment_min": 0.95,
+      "error_rate_max": 0.01
+    }
+  },
+  "vllm": {
+    "min_repeats": 3,
+    "points": [
+      "cmp-c8",
+      "cmp-c32",
+      "cmp-c128"
+    ]
+  },
+  "evidence": {
+    "gpu_telemetry_min_coverage": 0.8,
+    "gpu_telemetry_max_gap_factor": 5,
+    "gap_analysis_marker": "## Why vLLM differs"
+  },
+  "budget": {
+    "usd": 9.0,
+    "stage_cap_grace_minutes": 1.0
+  }
+}

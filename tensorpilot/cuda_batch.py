@@ -178,13 +178,19 @@ class CUDABatchAdapter:
     MAX_CAPACITY = 256
 
     def __init__(self, backend, *, capacity=8, prefill_step_size=256, row_tokens=None,
-                 kv_budget_bytes=None, headroom_bytes=DEFAULT_HEADROOM_BYTES):
+                 kv_budget_bytes=None, headroom_bytes=DEFAULT_HEADROOM_BYTES, prefill_pack_tokens=0):
         import torch
         self.torch = torch
         if type(capacity) is not int or not 1 <= capacity <= self.MAX_CAPACITY:
             raise ValueError(f"batch capacity must be in 1..{self.MAX_CAPACITY}")
         if type(prefill_step_size) is not int or prefill_step_size < 1:
             raise ValueError("prefill_step_size must be positive")
+        if type(prefill_pack_tokens) is not int or not 0 <= prefill_pack_tokens <= 16384:
+            raise ValueError("prefill_pack_tokens must be an integer in 0..16384 (0 disables packing)")
+        # Packed prefill runs several fresh, single-chunk prompts in one right-padded forward and writes their K/V
+        # straight into the decode slots they will occupy. 0 keeps the one-prompt-per-forward path with a staging row.
+        self.prefill_pack_tokens = prefill_pack_tokens
+        self.margin_probe = None     # diagnostics: {uid: [(top1_id, top2_id, top1_logit, top2_logit) per emitted token]}; None = off
         model = backend.model
         self.geometry = read_geometry(model.config)
         module = sys.modules[type(model).__module__]
@@ -223,7 +229,8 @@ class CUDABatchAdapter:
         self.last_insert_profile = None
         self.counters = {"decode_steps": 0, "prefill_chunks": 0, "decode_tokens": 0, "prefill_tokens": 0,
                          "decode_execution_s": 0.0, "prefill_execution_s": 0.0, "max_decode_width": 0,
-                         "sequences_finished": 0, "sequences_removed": 0, "slot_moves": 0}
+                         "sequences_finished": 0, "sequences_removed": 0, "slot_moves": 0,
+                         "prefill_packed_forwards": 0, "prefill_packed_sequences": 0}
         with torch.inference_mode():
             shape = (self.capacity + 1, self.geometry.kv_heads, self.row_tokens, self.geometry.head_dim)
             # Zeros, not empty: masked columns are multiplied by probability 0, and 0 * NaN would poison
@@ -364,8 +371,10 @@ class CUDABatchAdapter:
             hidden = residual + attention.o_proj(out.reshape(batch, count, -1))
             hidden = hidden + layer.mlp(layer.post_attention_layernorm(hidden))
         hidden = backbone.norm(hidden)
-        if last_only:
+        if last_only is True:
             hidden = hidden[:, -1:, :]
+        elif last_only is not False:   # a tensor of each row's last real position (right-padded rows)
+            hidden = hidden[torch.arange(batch, device=hidden.device), last_only].unsqueeze(1)
         return self.model.lm_head(hidden)
 
     def _guard_oom(self, error):
@@ -374,8 +383,86 @@ class CUDABatchAdapter:
             self.torch.cuda.empty_cache()
         raise error
 
+    def _choose(self, rows, uids):
+        """Greedy token per row. With the diagnostic probe on, also record each row's two best tokens and logits."""
+        if self.margin_probe is None:
+            return self.torch.argmax(rows, dim=-1).tolist()
+        top = self.torch.topk(rows.float(), 2, dim=-1)
+        ids, values = top.indices.tolist(), top.values.tolist()
+        for uid, (first, second), (high, low) in zip(uids, ids, values):
+            self.margin_probe.setdefault(uid, []).append((first, second, high, low))
+        return [first for first, _ in ids]
+
+    def _pack_group(self):
+        """The longest FIFO prefix of fresh, single-chunk prompts that fits the packing budget (padded tokens)."""
+        if not self.prefill_pack_tokens:
+            return []
+        free_rows = self.capacity - len(self.decoding)
+        group, widest = [], 0
+        for uid in self.prefill_queue:
+            sequence = self.sequences[uid]
+            length = len(sequence.prompt_ids)
+            if sequence.prefilled or length > self.prefill_step_size or len(group) >= free_rows:
+                break
+            if group and (len(group) + 1) * max(widest, length) > self.prefill_pack_tokens:
+                break
+            group.append(sequence)
+            widest = max(widest, length)
+        return group
+
+    def _prefill_packed(self, group):
+        """One forward for ``group``: rows are right-padded, causal masking keeps real tokens blind to the padding."""
+        torch = self.torch
+        count = len(group)
+        width = max(len(sequence.prompt_ids) for sequence in group)
+        base = len(self.decoding)
+        self._sync()
+        began = time.perf_counter()
+        ids = torch.tensor([sequence.prompt_ids + [0] * (width - len(sequence.prompt_ids)) for sequence in group],
+                           dtype=torch.long, device=self.device)
+        last = torch.tensor([len(sequence.prompt_ids) - 1 for sequence in group], dtype=torch.long, device=self.device)
+        positions = torch.arange(width, dtype=torch.long, device=self.device).unsqueeze(0).repeat(count, 1)
+        mask = torch.tril(torch.ones(width, width, dtype=torch.bool, device=self.device)).view(1, 1, width, width)
+
+        def write(layer, k, v):
+            self.keys[layer][base:base + count, :, :width] = k
+            self.values[layer][base:base + count, :, :width] = v
+
+        try:
+            logits = self._forward(ids, positions, mask, write, slice(base, base + count), width, last_only=last)
+        except self.torch.OutOfMemoryError as error:
+            self._guard_oom(error)
+        tokens = self._choose(logits[:, 0], [sequence.uid for sequence in group])
+        self._sync()
+        execution_s = time.perf_counter() - began
+        real_tokens = sum(len(sequence.prompt_ids) for sequence in group)
+        self.counters["prefill_chunks"] += 1
+        self.counters["prefill_tokens"] += real_tokens
+        self.counters["prefill_execution_s"] += execution_s
+        self.counters["prefill_packed_forwards"] += 1
+        self.counters["prefill_packed_sequences"] += count
+        del self.prefill_queue[:count]
+        events, survivors = [], []
+        for row, (sequence, token) in enumerate(zip(group, tokens)):
+            sequence.prefilled = sequence.length = len(sequence.prompt_ids)
+            events.append((sequence.uid, self._emit(sequence, token)))
+            if sequence.uid in self.sequences:   # not finished by its first token
+                survivors.append((row, sequence))
+        for position, (row, sequence) in enumerate(survivors):
+            if row != position:   # earlier rows finished at their first token: close the gap (ascending is safe)
+                for layer in range(self.geometry.layers):
+                    self.keys[layer][base + position, :, :sequence.length] = self.keys[layer][base + row, :, :sequence.length]
+                    self.values[layer][base + position, :, :sequence.length] = self.values[layer][base + row, :, :sequence.length]
+                self.counters["slot_moves"] += 1
+            sequence.slot = base + position
+            self.decoding.append(sequence.uid)
+        return events, execution_s
+
     def _prefill_chunk(self):
         torch = self.torch
+        group = self._pack_group()
+        if group:
+            return self._prefill_packed(group)
         sequence = self.sequences[self.prefill_queue[0]]
         start = sequence.prefilled
         chunk = sequence.prompt_ids[start:start + self.prefill_step_size]
@@ -399,7 +486,7 @@ class CUDABatchAdapter:
         sequence.prefilled = width
         sequence.length = width
         finished_prompt = width == len(sequence.prompt_ids)
-        token = int(torch.argmax(logits[0, -1]).item()) if finished_prompt else None
+        token = self._choose(logits[0, -1].unsqueeze(0), [sequence.uid])[0] if finished_prompt else None
         self._sync()
         execution_s = time.perf_counter() - began
         self.counters["prefill_chunks"] += 1
@@ -444,7 +531,7 @@ class CUDABatchAdapter:
             logits = self._forward(ids, positions, mask, write, slice(0, rows), width, last_only=True)
         except self.torch.OutOfMemoryError as error:
             self._guard_oom(error)
-        sampled = torch.argmax(logits[:, -1], dim=-1).tolist()  # the step's only host synchronization
+        sampled = self._choose(logits[:, -1], list(self.decoding))  # the step's only host synchronization
         self._sync()
         execution_s = time.perf_counter() - began
         events, finished_slots = [], []
@@ -508,9 +595,10 @@ class CUDABatchAdapterFactory:
 
     MAX_CAPACITY = CUDABatchAdapter.MAX_CAPACITY
 
-    def __init__(self, *, row_tokens=None, kv_budget_bytes=None, headroom_bytes=DEFAULT_HEADROOM_BYTES):
+    def __init__(self, *, row_tokens=None, kv_budget_bytes=None, headroom_bytes=DEFAULT_HEADROOM_BYTES,
+                 prefill_pack_tokens=0):
         self.options = {"row_tokens": row_tokens, "kv_budget_bytes": kv_budget_bytes,
-                        "headroom_bytes": headroom_bytes}
+                        "headroom_bytes": headroom_bytes, "prefill_pack_tokens": prefill_pack_tokens}
 
     def __call__(self, backend, *, capacity, prefill_step_size):
         return CUDABatchAdapter(backend, capacity=capacity, prefill_step_size=prefill_step_size,

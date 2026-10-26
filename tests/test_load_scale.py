@@ -223,3 +223,24 @@ def test_the_namespace_gpu_bench_builds_still_works(tmp_path):
             return await load.run(old)
 
     assert asyncio.run(scenario())["summary"]["successful_requests"] == 1
+
+
+def test_the_load_client_accepts_1024_clients_but_not_more():
+    import tensorpilot.load as load_module
+    assert load_module.MAX_CONCURRENCY == 1024
+
+
+def test_fd_limit_is_raised_when_possible_and_refused_when_the_hard_limit_is_too_low(monkeypatch):
+    resource = pytest.importorskip("resource")
+    import tensorpilot.load as load_module
+    calls = []
+    monkeypatch.setattr(resource, "getrlimit", lambda which: (256, 100000))
+    monkeypatch.setattr(resource, "setrlimit", lambda which, value: calls.append(value))
+    load_module.ensure_fd_limit(1024)
+    assert calls == [(1024 + load_module.FD_HEADROOM, 100000)]
+    calls.clear()
+    load_module.ensure_fd_limit(16)          # already enough: untouched
+    assert calls == []
+    monkeypatch.setattr(resource, "getrlimit", lambda which: (256, 512))
+    with pytest.raises(RuntimeError, match="hard limit is 512"):
+        load_module.ensure_fd_limit(1024)

@@ -43,7 +43,8 @@ multiple independent sequences through that thread.
   report generator that invents nothing.
 - Verified on CPU and inside the Linux image; **nothing has run on a GPU**, so there are no v1.0 performance numbers. The only GPU evidence is the
   immutable v0.9.1-4 baseline (`benchmarks/baselines/`). Start with [`docs/v10-evaluation-plan.md`](docs/v10-evaluation-plan.md); the design is in
-  [`docs/v10-architecture.md`](docs/v10-architecture.md) and the Pod procedure in [`docs/v10-runbook.md`](docs/v10-runbook.md).
+  [`docs/v10-architecture.md`](docs/v10-architecture.md) and the Pod procedure in [`docs/v10-runbook.md`](docs/v10-runbook.md). The production-scale plan, its automated acceptance checks and the analysis of the
+  quick-session evidence are in [`docs/v10-production-evaluation.md`](docs/v10-production-evaluation.md).
 
 Real MLX inference and CPU behavior tests are separate evidence. A scheduling
 policy is experimental until measured against a baseline; improvements to one

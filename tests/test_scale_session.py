@@ -448,3 +448,37 @@ def test_the_real_quick_serial_stage_produces_evidence_that_quick_compare_can_re
     assert c1["tok_per_s"] > 0 and c8["tok_per_s"] > 0 and facts["interrupted"] is False
     verdict = quick_compare.judge(facts, facts)
     assert "evidence_present" not in {c["name"] for c in verdict["checks"]}, "both throughput checks were computed from real files"
+
+
+# ----- production-scale additions ---------------------------------------------------------------------------
+
+def test_the_plan_shows_packing_and_the_queue_for_a_production_stage(tmp_path):
+    result = run(["--plan", "7b-bf16-prod"], tmp_path)
+    assert result.returncode == 0
+    assert "slots / queue:   48 / 1100" in result.stdout
+    assert "prefill packing: 2048 padded tokens per forward (0 = off), listen backlog 2048" in result.stdout
+
+
+def test_the_operator_can_turn_packing_off_for_a_stage_but_not_set_nonsense(tmp_path):
+    off = run(["--plan", "7b-bf16-prod"], tmp_path, env={"PREFILL_PACK_TOKENS": "0"})
+    assert off.returncode == 0 and "prefill packing: 0 padded tokens" in off.stdout
+    for bad in ("-1", "abc", "16385", "1.5"):
+        refused = run(["--plan", "7b-bf16-prod"], tmp_path, env={"PREFILL_PACK_TOKENS": bad})
+        assert refused.returncode != 0 and "PREFILL_PACK_TOKENS must be an integer in 0..16384" in refused.stderr
+
+
+def test_the_list_includes_the_production_and_probe_stages(tmp_path):
+    result = run(["--list"], tmp_path)
+    for stage in ("7b-bf16-prod-serial", "7b-bf16-prod", "14b-nf4-prod", "vllm-7b-bf16-prod", "probe-7b", "probe-0.5b",
+                  "0.5b-quick-batch-packed"):
+        assert stage in result.stdout
+
+
+def test_every_stage_records_who_ran_it_without_recording_any_secret(tmp_path):
+    result, _ = stage_with_stub(tmp_path, TENSORPILOT_IMAGE_REF="ghcr.io/x/y@sha256:" + "a" * 64, RUNPOD_POD_ID="pod-1")
+    assert result.returncode == 0, result.stderr[-1500:]
+    (directory,) = stage_dirs(tmp_path)
+    info = json.loads((directory / "stage-info.json").read_text())
+    assert info["stage"] == "0.5b-serial" and info["environment"]["RUNPOD_POD_ID"] == "pod-1"
+    assert info["environment"]["TENSORPILOT_IMAGE_REF"].endswith("a" * 64)
+    assert KEY not in (directory / "stage-info.json").read_text() and "TENSORPILOT_API_KEY" not in info["environment"]

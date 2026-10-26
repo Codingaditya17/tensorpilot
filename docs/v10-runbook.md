@@ -1,5 +1,8 @@
 # v1.0 GPU evaluation: Pod runbook
 
+> The production-scale plan (scale sweep to 1,024 clients, vLLM comparison, acceptance verdict, $9 budget) has its own sessions, gates and commands in
+> [`v10-production-evaluation.md`](v10-production-evaluation.md). This runbook still describes the Pod mechanics both plans share.
+
 Nothing here has been run. Do not rent a Pod until you have decided to, and do not run anything beyond the first short session until its gate has passed. The plan, costs and
 caveats are in [`v10-evaluation-plan.md`](v10-evaluation-plan.md). **Terminating the Pod, not exiting the container, is what stops billing.**
 
