@@ -30,3 +30,20 @@ def make_tiny_model_dir(directory, *, seed=0):
     LlamaForCausalLM(config).save_pretrained(directory)
     fast.save_pretrained(directory)
     return directory
+
+
+def make_tiny_qwen2_model(*, seed=1):
+    """An in-memory randomly initialized Qwen2 model with the same vocabulary as the tokenizer fixture.
+
+    A Qwen2 config makes AutoTokenizer select a byte-level BPE class that cannot load the word-level
+    tokenizer, so tests keep the Llama directory for tokenization and swap this model in. Qwen2 has biased
+    q/k/v projections, the layout of the real Qwen2.5 checkpoints.
+    """
+    import torch
+    from transformers import Qwen2Config, Qwen2ForCausalLM
+
+    config = Qwen2Config(vocab_size=len(WORDS), hidden_size=32, intermediate_size=64, num_hidden_layers=2,
+                         num_attention_heads=4, num_key_value_heads=2, max_position_embeddings=256,
+                         eos_token_id=EOS_ID, bos_token_id=None, pad_token_id=None)
+    torch.manual_seed(seed)
+    return Qwen2ForCausalLM(config).eval()

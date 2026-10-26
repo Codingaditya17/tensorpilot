@@ -27,8 +27,9 @@ class BatchEngine(Engine):
     def __init__(self, factory, queue_size=8, metrics=None, *, max_batch_size=2,
                  prefill_step_size=256, adapter_factory=MLXBatchAdapter,
                  adaptive_controller=None, **kwargs):
-        if type(max_batch_size) is not int or not 1 <= max_batch_size <= 8:
-            raise ValueError("max_batch_size must be in 1..8")
+        limit = getattr(adapter_factory, "MAX_CAPACITY", 8)
+        if type(max_batch_size) is not int or not 1 <= max_batch_size <= limit:
+            raise ValueError(f"max_batch_size must be in 1..{limit}")
         if type(prefill_step_size) is not int or not 1 <= prefill_step_size <= 2048:
             raise ValueError("prefill_step_size must be in 1..2048")
         super().__init__(factory, queue_size, metrics, **kwargs)
@@ -66,6 +67,13 @@ class BatchEngine(Engine):
             raise ValueError("per-token memory profiling is not supported by batch execution yet")
         self.adapter = await self.call(lambda: self.adapter_factory(
             self.backend, capacity=self.max_active_sequences, prefill_step_size=self.prefill_step_size))
+        # An adapter that owns memory may grant fewer slots than requested and sizes admission in real bytes.
+        granted = getattr(self.adapter, "capacity", None)
+        if granted is not None:
+            self.max_active_sequences = granted
+        build_admission = getattr(self.adapter, "build_admission", None)
+        if build_admission is not None:
+            self.admission = build_admission(self.queue.capacity)
 
     def _degrade(self, reason):
         super()._degrade(reason)

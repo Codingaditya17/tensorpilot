@@ -23,10 +23,20 @@ def test_cuda_refuses_the_mlx_default_model(monkeypatch, capsys):
     assert "needs --model" in parse_error(monkeypatch, capsys, "--backend", "cuda")
 
 
-def test_cuda_refuses_batch_execution(monkeypatch, capsys):
+def test_cuda_refuses_adaptive_execution_but_accepts_batch(monkeypatch, capsys):
     message = parse_error(monkeypatch, capsys, "--backend", "cuda", "--model", "org/model",
-                          "--execution", "batch")
-    assert "serial" in message
+                          "--execution", "adaptive")
+    assert "MLX-only" in message
+    # Batch is accepted by argument validation; a bad width is the failure here, not the mode.
+    message = parse_error(monkeypatch, capsys, "--backend", "cuda", "--model", "org/model",
+                          "--execution", "batch", "--batch-size", "257")
+    assert "1..256" in message and "cuda" in message
+
+
+def test_batch_width_limits_differ_by_backend(monkeypatch, capsys):
+    assert "1..8" in parse_error(monkeypatch, capsys, "--execution", "batch", "--batch-size", "9")
+    assert "kv-budget-gib" in parse_error(monkeypatch, capsys, "--backend", "cuda", "--model", "org/model",
+                                          "--execution", "batch", "--kv-budget-gib", "-1")
 
 
 def test_cuda_refuses_mlx_memory_profiling_and_bad_fraction(monkeypatch, capsys):

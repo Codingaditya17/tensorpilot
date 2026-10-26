@@ -162,6 +162,8 @@ def create_app(factory, *, queue_size=8, max_tokens=256, max_timeout=120,
                                   "startup_profile": engine.startup_profile,
                                   "gpu_telemetry": gpu_telemetry.snapshot() if gpu_telemetry else None,
                                   "runtime_profile": engine.runtime_profile(),
+                                  "kv_pool": (engine.adapter.snapshot()
+                                              if hasattr(getattr(engine, "adapter", None), "snapshot") else None),
                                   "adaptive_policy": (engine.adaptive_controller.snapshot()
                                                       if getattr(engine, "adaptive_controller", None) else None),
                                   "memory_sample_age_s": (time.perf_counter() - engine.last_memory_sample_s
@@ -256,8 +258,13 @@ def main():
     parser.add_argument("--max-prompt-tokens", type=int, default=2048,
                         help="prompt token cap, enforced before inference (1..8192)")
     parser.add_argument("--execution", choices=("serial", "batch", "adaptive"), default="serial",
-                        help="batch is opt-in real continuous MLX batching")
-    parser.add_argument("--batch-size", type=int, default=2, help="maximum active batch sequences (1..8)")
+                        help="batch is opt-in real continuous batching (MLX, or CUDA for Qwen2/Llama models)")
+    parser.add_argument("--batch-size", type=int, default=2,
+                        help="maximum active batch sequences (1..8 for MLX; 1..256 for CUDA, reduced to fit the KV pool)")
+    parser.add_argument("--kv-budget-gib", type=float, default=0,
+                        help="CUDA batch: KV slot pool budget in GiB; 0 sizes it from free VRAM")
+    parser.add_argument("--kv-headroom-gib", type=float, default=1.5,
+                        help="CUDA batch: VRAM kept free of weights and KV for activations and allocator overhead")
     parser.add_argument("--prefill-step-size", type=int, default=256, help="batch prefill segmentation (1..2048)")
     parser.add_argument("--adaptive-latency-target", type=float, default=.25,
                         help="oldest queue wait that triggers maximum adaptive width")
@@ -295,8 +302,12 @@ def main():
         parser.error("max-queue-wait must be finite and positive")
     if not math.isfinite(args.stall_timeout) or args.stall_timeout <= 0:
         parser.error("stall-timeout must be finite and positive")
-    if not 1 <= args.batch_size <= 8 or not 1 <= args.prefill_step_size <= 2048:
-        parser.error("batch-size must be in 1..8; prefill-step-size in 1..2048")
+    width_limit = 256 if args.backend == "cuda" else 8
+    if not 1 <= args.batch_size <= width_limit or not 1 <= args.prefill_step_size <= 2048:
+        parser.error(f"batch-size must be in 1..{width_limit} for the {args.backend} backend; "
+                     "prefill-step-size in 1..2048")
+    if args.kv_budget_gib < 0 or args.kv_headroom_gib < 0:
+        parser.error("kv-budget-gib and kv-headroom-gib cannot be negative")
     if (not math.isfinite(args.adaptive_latency_target) or args.adaptive_latency_target <= 0 or
             not 0 < args.adaptive_memory_soft_limit < args.adaptive_memory_hard_limit <= 1):
         parser.error("adaptive target must be positive and 0 < soft memory limit < hard limit <= 1")
@@ -305,8 +316,8 @@ def main():
     if args.backend == "cuda":
         if args.model == DEFAULT_MODEL:
             parser.error("--backend cuda needs --model naming a Transformers checkpoint; the MLX default is not loadable")
-        if args.execution != "serial":
-            parser.error("CUDA backend supports --execution serial only; batch execution is MLX-specific")
+        if args.execution == "adaptive":
+            parser.error("--execution adaptive is MLX-only; the CUDA backend supports serial and batch")
         if args.profile_memory:
             parser.error("--profile-memory is MLX-only")
         if not 0 < args.cuda_memory_fraction <= 1:
@@ -342,6 +353,12 @@ def main():
                                revision=args.revision, offline=args.offline, device=args.device,
                                dtype=args.dtype, memory_fraction=args.cuda_memory_fraction,
                                cache_dir=args.cache_dir)
+    adapter_factory = None
+    if args.backend == "cuda" and args.execution == "batch":
+        from .cuda_batch import CUDABatchAdapterFactory
+        adapter_factory = CUDABatchAdapterFactory(
+            kv_budget_bytes=int(args.kv_budget_gib * 1024**3) or None,
+            headroom_bytes=int(args.kv_headroom_gib * 1024**3))
     app = create_app(factory,
                      queue_size=args.queue_size, max_tokens=args.max_output_tokens,
                      metadata=metadata, api_key=api_key,
@@ -354,7 +371,7 @@ def main():
                      adaptive_latency_target_s=args.adaptive_latency_target,
                      adaptive_memory_soft_limit=args.adaptive_memory_soft_limit,
                      adaptive_memory_hard_limit=args.adaptive_memory_hard_limit,
-                     gpu_telemetry=telemetry)
+                     gpu_telemetry=telemetry, batch_adapter_factory=adapter_factory)
     web.run_app(app, host=args.host, port=args.port, handler_cancellation=True, access_log=None)
 
 

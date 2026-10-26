@@ -2,6 +2,8 @@
 from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, generate_latest
 import time
 
+WIDTH_BUCKETS = (1, 2, 4, 8, 16, 32, 64, 128, 256)
+
 
 class Metrics:
     def __init__(self):
@@ -35,12 +37,17 @@ class Metrics:
                                  ["reason"], **options)
         self.batch_steps = Counter("tensorpilot_batch_steps", "Shared batch prefill/decode steps", **options)
         self.decode_width = Histogram("tensorpilot_decode_batch_width", "Actual response count per nonempty batch decode step",
-                                      buckets=(1, 2, 4, 8), **options)
+                                      buckets=WIDTH_BUCKETS, **options)
         self.batch_occupancy = Histogram("tensorpilot_batch_occupancy", "Active sequences at a measured batch step",
-                                         buckets=(1, 2, 4, 8), **options)
+                                         buckets=WIDTH_BUCKETS, **options)
         self.batch_step_seconds = Histogram("tensorpilot_batch_step_seconds",
                                              "Synchronized model-thread step time by phase", ["phase"],
                                              buckets=(.001, .005, .01, .025, .05, .1, .25, .5, 1, 2, 5), **options)
+        self.kv_rows_active = Gauge("tensorpilot_kv_pool_rows_active", "Decode rows in use in the CUDA KV slot pool", **options)
+        self.kv_rows_capacity = Gauge("tensorpilot_kv_pool_rows_capacity", "Decode rows the CUDA KV slot pool holds", **options)
+        self.kv_prefill_waiting = Gauge("tensorpilot_kv_pool_prefill_waiting", "Sequences waiting for or in prefill", **options)
+        self.kv_bytes_filled = Gauge("tensorpilot_kv_pool_bytes_filled", "KV bytes holding live tokens (measured, not reserved)", **options)
+        self.kv_bytes_allocated = Gauge("tensorpilot_kv_pool_bytes_allocated", "KV slot pool bytes allocated at startup", **options)
         self.adaptive_width = Gauge("tensorpilot_adaptive_batch_width", "Latest adaptive target width", **options)
         self.adaptive_decisions = Counter("tensorpilot_adaptive_decisions", "Adaptive width decisions by bounded reason",
                                           ["reason", "width"], **options)
@@ -55,6 +62,14 @@ class Metrics:
         self.estimated_kv_reserved.set(engine.admission.reserved_bytes)
         self.estimated_kv_budget.set(engine.admission.budget_bytes)
         self.call_age.set(time.perf_counter() - engine.call_started_s if engine.call_started_s is not None else 0)
+        pool = getattr(getattr(engine, "adapter", None), "snapshot", None)
+        if pool is not None:
+            snapshot = pool()
+            self.kv_rows_active.set(snapshot["decode_rows_active"])
+            self.kv_rows_capacity.set(snapshot["capacity_rows"])
+            self.kv_prefill_waiting.set(snapshot["prefill_waiting"])
+            self.kv_bytes_filled.set(snapshot["kv_bytes_filled"])
+            self.kv_bytes_allocated.set(snapshot["pool_bytes_allocated"])
         if engine.last_memory_sample_s is not None:
             self.memory_age.set(time.perf_counter() - engine.last_memory_sample_s)
         return generate_latest(self.registry)
