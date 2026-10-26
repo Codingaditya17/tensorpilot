@@ -38,19 +38,31 @@ Architectural bottlenecks and gaps found on reading the code:
 |---|---|---|---|---|---|
 | R1 | A CUDA-only error in the batched path (as the bare-device `ValueError` was) | high: it has never run on CUDA | a wasted first session | cheapest stage first (`0.5b-serial`, `0.5b-batch`); preflight and smoke gates; evidence always written | open: cannot be retired without a GPU |
 | R2 | bf16 batching changes numerics so outputs depend on co-batched requests | medium | correctness claim weakened | `batch_invariance` measures it; a deliberately broken worker is caught in tests | measured on the first GPU run |
-| R3 | The 7B pool is tight (about 0.15 GiB spare at 64 slots) | medium | fewer slots than planned | the planner grants fewer slots, never silently more; a gate requires at least 32 | gated |
+| R3 | The 7B pool leaves too little memory (the first draft asked for 64 slots: an estimated 1.66 GiB free) | medium | OOM mid-sweep | planner headroom raised to 2.5 GiB; stages request 48 (7B) and 28 (14B) slots, a test enforces at least 2.4 GiB; the stage runner measures the real margin and the granted slots before benchmarking (`memory_gate`) and stops if short | mitigated; the gate does not see the heaviest prefill-burst activations, so telemetry records the peak and an OOM aborts the experiment |
 | R4 | bitsandbytes' CUDA kernels fail or are slow with torch 2.9.1 | medium | 14B stage unusable | the wheel ships a CUDA 12.8 binary; stack check and preflight fail loudly; session B starts after session A | open |
 | R5 | NF4 is slower than bf16 at batch widths above one (per-step dequantization) | medium | a negative result | stated as a hypothesis; measured, not assumed | by design |
 | R6 | The Python event loop or per-token JSON streaming bottlenecks before the GPU does | medium at 64–128 clients | throughput capped below the GPU's | server telemetry and the GPU-active decode rate separate the two | measured |
 | R7 | vLLM's torch 2.13 / CUDA 13.0 needs driver 580+ | low on a recent host | vLLM stage unrunnable | the stage and installer check the driver before any download | gated |
 | R8 | vLLM silently applies the model's sampling defaults | high if unaddressed | invalid comparison | explicit request fields, `--generation-config vllm`, and a stage guard | mitigated |
 | R9 | Cost overrun | medium | money | per-experiment and per-stage hard caps, a budget ledger that bounds stage time, termination checklist | bounded for stage time only |
-| R10 | Forgetting to terminate the Pod | the largest cost risk | money | the report of billing is manual; the runbook and the stage runner print the reminder; the lifetime backstop does not terminate | **cannot be automated away** |
+| R10 | Forgetting to terminate the Pod | the largest cost risk | money | the runbook and the stage runner print the reminder; the container exits at its lifetime backstop, but a container exit is **not assumed** to stop billing | **cannot be automated away** |
+| R16 | The lifetime backstop (120 min default) ends a 3.7–4.4 h session mid-stage | certain with the default | lost evidence | deadline published by the entrypoint; each stage refused unless the real remaining time covers its cap, one load limit and 12 minutes to archive; a watchdog stops and archives the running stage 12 minutes before the deadline; the runbook sets 150 / 480 / 540 minutes | tested (precondition, watchdog, cancellation of the watchdog) |
+| R17 | An interrupted stage (Ctrl-C, SSH drop, SIGTERM) loses its evidence | high in a long session | lost evidence and no ledger entry | children run under `wait` so traps fire at once; one idempotent finalize archives and records the ledger; the benchmark writes a complete manifest and keeps unfinished journals | tested with real signals (TERM, INT, HUP) and during engine start-up |
 | R11 | Two Pods are different physical cards | certain | uncontrolled variable | each vLLM stage runs in the same Pod as its TensorPilot stage | designed out within a session |
 | R12 | Small samples make tails look precise | certain at c=1 | overclaiming | smallest-repeat flag, hollow markers, a caveat on every report | mitigated |
 | R13 | A stage hangs past its cap | low | cost | `timeout` with a kill-after, a soft stop a minute earlier, a ledger entry regardless | tested with a runaway stub |
 | R14 | An API key leaks into evidence | low | credential exposure | keys travel by environment only; archives are refused if they contain a key; redaction in traces | tested, including a refusal test |
 | R15 | The published tags and images are mutable | low | irreproducible evidence | immutable tags and digests; a new fix gets a new tag; the baseline checksum is a test | enforced |
+
+## Defects found while preparing the release candidate
+
+| Found by | Defect | Fix |
+|---|---|---|
+| Re-reading the plan | the 7B stage requested 64 slots, leaving an estimated 1.66 GiB | headroom 2.5 GiB, slot counts reduced, planner test, runtime memory gate |
+| Re-reading the runner | its signal handler exited without archiving, and bash defers traps while a foreground child runs, so an interrupt would also have orphaned the benchmark | children run as background jobs under `wait`; idempotent finalize; tests that send real signals |
+| Writing that test | the new trap logs vanished: they ran inside the benchmark's output redirection | only the child's output is redirected |
+| Reading the benchmark | an interrupted experiment left no manifest entry and no completion time | SIGTERM handling, `interrupted` manifest, partial journals kept |
+| Re-reading the lifetime guard | it compared the Pod's total lifetime with the budget, ignoring time already spent and ignoring that it only prevents a doomed start | real remaining time from a published deadline, plus a watchdog |
 
 ## Decisions worth being able to defend
 

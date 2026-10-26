@@ -16,6 +16,7 @@ import json
 import math
 import os
 import re
+import signal
 import sys
 import time
 import uuid
@@ -430,11 +431,13 @@ async def run_experiment(config, experiment, *, url, output_dir, config_sha256, 
 def _server_health(url, api="tensorpilot"):
     """One synchronous read so the manifest records the server's mode and precision at the start."""
     import urllib.request
+    if not url.startswith(("http://", "https://")):
+        return None
     key = os.environ.get("TENSORPILOT_API_KEY")
     path = "/v1/models" if api == "openai" else "/health"
     request = urllib.request.Request(url.rstrip("/") + path, headers={"Authorization": "Bearer " + key} if key else {})
     try:
-        with urllib.request.urlopen(request, timeout=10) as response:
+        with urllib.request.urlopen(request, timeout=10) as response:  # nosec B310 - scheme validated above
             return json.loads(response.read())
     except Exception:
         return None
@@ -470,19 +473,46 @@ def run(config, *, url, output_dir, only=None, config_path=None, session_minutes
                 "experiments": {}, "limitations": limitations_for(server_at_start, api),
                 "server_at_start": server_at_start, "api": api}
     manifest_path = output / "manifest.json"
-    for experiment in chosen:
-        remaining = budget_min * 60 - (time.monotonic() - session_started)
-        if remaining <= 0:
-            manifest["experiments"][experiment["id"]] = {"status": "skipped", "abort_reason": "session_budget"}
-        else:
-            outcome = asyncio.run(run_experiment(
-                config, experiment, url=url.rstrip("/"), output_dir=output,
-                config_sha256=digest, allowed_seconds=remaining))
-            manifest["experiments"][experiment["id"]] = outcome
-        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    interrupted = False
+    previous_handler = signal.signal(signal.SIGTERM, _raise_interrupt)
+    try:
+        for experiment in chosen:
+            remaining = budget_min * 60 - (time.monotonic() - session_started)
+            if interrupted:
+                manifest["experiments"][experiment["id"]] = {"status": "skipped", "abort_reason": "interrupted"}
+            elif remaining <= 0:
+                manifest["experiments"][experiment["id"]] = {"status": "skipped", "abort_reason": "session_budget"}
+            else:
+                started = time.monotonic()
+                try:
+                    outcome = asyncio.run(run_experiment(
+                        config, experiment, url=url.rstrip("/"), output_dir=output,
+                        config_sha256=digest, allowed_seconds=remaining))
+                except KeyboardInterrupt:
+                    interrupted = True
+                    outcome = _interrupted_outcome(output / experiment["id"], time.monotonic() - started)
+                manifest["experiments"][experiment["id"]] = outcome
+            manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    finally:
+        signal.signal(signal.SIGTERM, previous_handler)
+    manifest["interrupted"] = interrupted
     manifest["finished_at_utc"] = datetime.now(timezone.utc).isoformat()
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
     return manifest
+
+
+def _raise_interrupt(signum, frame):
+    raise KeyboardInterrupt(f"signal {signum}")
+
+
+def _interrupted_outcome(directory, elapsed):
+    """What an experiment cut short by SIGINT or SIGTERM left behind: finished repeats, plus journals of unfinished ones."""
+    finished = sorted(path.name for path in directory.glob("repeat*.json") if not path.name.endswith(".workload.json"))
+    stems = {name[:-len(".json")] for name in finished}
+    partial = sorted(path.name for path in directory.glob("repeat*.requests.jsonl")
+                     if path.name[:-len(".requests.jsonl")] not in stems)
+    return {"artifacts": finished, "partial_journals": partial, "status": "aborted", "abort_reason": "interrupted",
+            "elapsed_s": round(elapsed, 1)}
 
 
 def main():
@@ -516,6 +546,8 @@ def main():
         manifest = run(config, url=args.url, output_dir=args.output_dir, only=args.only,
                        config_path=args.config, session_minutes=args.session_minutes)
         print(json.dumps({"output_dir": args.output_dir, "experiments": list(manifest["experiments"])}, indent=2))
+        if manifest.get("interrupted"):
+            sys.exit(130)
     except (ValueError, OSError, RuntimeError) as exc:
         parser.exit(1, f"gpu-bench failed: {exc}\n")
 

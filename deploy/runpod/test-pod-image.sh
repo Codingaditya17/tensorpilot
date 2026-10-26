@@ -45,6 +45,13 @@ check "benchmark configs shipped" pod 'test -f benchmarks/gpu/v09-first-30min.js
 check "non-secret settings reach SSH sessions" pod '[ -n "$TENSORPILOT_MODEL" ] && [ "$TENSORPILOT_REVISION" = 7ae557604adf67be50417f59c2c2f167def9a775 ] && [ "$HF_HOME" = /workspace/huggingface ] && [ "$TENSORPILOT_CACHE_DIR" = /workspace/huggingface ] && [ "$TENSORPILOT_RESULTS_ROOT" = /workspace/results ]'
 refuses "API keys are not forwarded or stored" pod 'env | grep -q API_KEY || grep -rq API_KEY /etc/profile.d'
 check "first-run.sh --plan validates" pod 'first-run.sh --plan'
+# The deadline the stage runner's lifetime guard and watchdog read: world-readable, an epoch inside this container's lifetime.
+check "the Pod deadline is published for the stage runner" pod 'python3 -c "
+import time
+deadline = float(open(\"/run/tensorpilot/pod-deadline-epoch\").read())
+assert 0 < deadline - time.time() <= 61, deadline - time.time()"'
+check "the stage runner lists the quick stages" pod 'scale_session.sh --list | grep -q 0.5b-quick-batch'
+check "the stage runner plans the first short stage from inside the image" pod 'SESSION_BUDGET_MINUTES=500 TENSORPILOT_POD_MAX_MINUTES=1 scale_session.sh --plan 0.5b-quick-serial 2>&1 | grep -q "lifetime backstop leaves"; [ $? -eq 0 ]'
 LISTEN="$(pod "python3 -c \"
 import re
 ports=sorted({int(l.split()[1].split(':')[1],16) for f in ('/proc/net/tcp','/proc/net/tcp6') for l in open(f).read().splitlines()[1:] if l.split()[3]=='0A'})

@@ -22,8 +22,8 @@
     "note": "planning numbers only; the experiment caps, not these estimates, bound cost"
   },
   "session_overhead_minutes": 5,
-  "max_session_minutes": 184,
-  "expected_experiment_minutes": 62.8,
+  "max_session_minutes": 190,
+  "expected_experiment_minutes": 65.3,
   "telemetry": {
     "interval_s": 1.0
   },
@@ -311,8 +311,8 @@
           }
         ]
       },
-      "estimated_minutes": 6.0,
-      "max_minutes": 17,
+      "estimated_minutes": 6.6,
+      "max_minutes": 19,
       "abort_error_rate": 0.5,
       "slo": {
         "ttft_s": 4.0,
@@ -376,8 +376,8 @@
           }
         ]
       },
-      "estimated_minutes": 5.2,
-      "max_minutes": 15,
+      "estimated_minutes": 5.9,
+      "max_minutes": 17,
       "abort_error_rate": 0.5,
       "slo": {
         "ttft_s": 4.0,
@@ -441,8 +441,8 @@
           }
         ]
       },
-      "estimated_minutes": 6.1,
-      "max_minutes": 18,
+      "estimated_minutes": 7.0,
+      "max_minutes": 20,
       "abort_error_rate": 0.5,
       "slo": {
         "ttft_s": 4.0,
@@ -515,7 +515,7 @@
           }
         ]
       },
-      "estimated_minutes": 16.6,
+      "estimated_minutes": 16.7,
       "max_minutes": 44,
       "abort_error_rate": 0.2,
       "slo": {
@@ -531,7 +531,7 @@
       "requests": 160,
       "concurrency": 256,
       "rates": [
-        4
+        3
       ],
       "arrival": "burst",
       "repeats": 1,
@@ -584,7 +584,7 @@
           }
         ]
       },
-      "estimated_minutes": 1.4,
+      "estimated_minutes": 1.6,
       "max_minutes": 6,
       "abort_error_rate": 0.5,
       "burst_size": 8,

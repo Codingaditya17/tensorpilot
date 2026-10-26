@@ -11,6 +11,9 @@ on:
       - deploy/runpod/**
       - tensorpilot/**
       - requirements-cuda.txt
+      - requirements-vllm.txt
+      - docs/v10-runbook.md
+      - docs/v10-evaluation-plan.md
       - pyproject.toml
       - benchmarks/gpu/**
       - docs/v09-runpod-*.md
@@ -45,12 +48,16 @@ jobs:
         run: |
           docker run --rm --user 0 -v "$PWD/tests:/repo/tests:ro" -v "$PWD/deploy:/repo/deploy:ro" \
             -v "$PWD/benchmarks:/repo/benchmarks:ro" -v "$PWD/requirements-cuda.txt:/repo/requirements-cuda.txt:ro" \
+            -v "$PWD/requirements-vllm.txt:/repo/requirements-vllm.txt:ro" \
             -w /repo -e PYTHONDONTWRITEBYTECODE=1 \
             --entrypoint bash tensorpilot-exp:ci -c '
               python -m pip install -q "pytest>=8,<10" &&
               python -m pytest -q -p no:cacheprovider tests/test_quantization.py tests/test_cuda_batch.py \
                 tests/test_cuda_batch_engine.py tests/test_quality.py tests/test_gpu_bench_scale.py \
-                tests/test_scale_session.py tests/test_fault_run.py tests/test_suite.py tests/test_telemetry.py'
+                tests/test_scale_session.py tests/test_fault_run.py tests/test_suite.py tests/test_telemetry.py \
+                tests/test_batch_invariance.py tests/test_report_v10.py tests/test_vllm_environment.py \
+                tests/test_baseline.py tests/test_load_scale.py tests/test_load_openai.py \
+                tests/test_memory_gate.py tests/test_quick_compare.py'
       - name: Verify SSH hardening, permissions, evidence path and shutdown (no GPU)
         run: deploy/runpod/test-pod-image.sh tensorpilot-exp:ci --slow
 

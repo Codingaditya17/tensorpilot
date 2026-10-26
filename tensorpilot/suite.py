@@ -31,10 +31,10 @@ MODELS = {
              "slots": 128, "slo": {"ttft_s": 1.0, "e2e_s": 10.0, "tpot_s": 0.05}},
     "7b": {"repo": "Qwen/Qwen2.5-7B-Instruct", "revision": "a09a35458c702b33eeacc393d103063234e8bc28",
            "single_stream_tok_s": 40, "single_stream_source": "ASSUMPTION: bf16 weight reads bound decode near 45 tok/s",
-           "slots": 64, "slo": {"ttft_s": 2.0, "e2e_s": 20.0, "tpot_s": 0.15}},
+           "slots": 48, "slo": {"ttft_s": 2.0, "e2e_s": 20.0, "tpot_s": 0.15}},
     "14b": {"repo": "Qwen/Qwen2.5-14B-Instruct", "revision": "cf98f3b3bbb457ad9e2bb7baf9a0125b6b88caa8",
             "single_stream_tok_s": 25, "single_stream_source": "ASSUMPTION: NF4 dequantization overhead, unmeasured",
-            "slots": 34, "slo": {"ttft_s": 4.0, "e2e_s": 40.0, "tpot_s": 0.35}},
+            "slots": 28, "slo": {"ttft_s": 4.0, "e2e_s": 40.0, "tpot_s": 0.35}},
 }
 
 CLASS_SHORT = {"name": "short", "prompt_tokens": {"dist": "uniform", "min": 16, "max": 64},
@@ -144,20 +144,27 @@ STAGES = {
                     "dtype": "float16", "max_prompt_tokens": 1024, "batch_size": 1, "queue_size": 64},
     "0.5b-batch": {"invariance": True, "model": "0.5b", "engine": "tensorpilot", "execution": "batch", "quantization": "none",
                    "dtype": "float16", "max_prompt_tokens": 1024, "batch_size": 128, "queue_size": 256},
+    # The first, short GPU session: the same four workloads on the 0.5B model, serial and then batched, each experiment capped at
+    # three minutes. It exists to answer "does CUDA batching run, stay correct and beat serial?" before any 7B or 14B spend.
+    "0.5b-quick-serial": {"model": "0.5b", "engine": "tensorpilot", "execution": "serial", "quantization": "none",
+                          "dtype": "float16", "max_prompt_tokens": 1024, "batch_size": 1, "queue_size": 64},
+    "0.5b-quick-batch": {"invariance": True, "model": "0.5b", "engine": "tensorpilot", "execution": "batch",
+                         "quantization": "none", "dtype": "float16", "max_prompt_tokens": 1024, "batch_size": 128,
+                         "queue_size": 256},
     "7b-bf16-serial": {"model": "7b", "engine": "tensorpilot", "execution": "serial", "quantization": "none",
                        "dtype": "bfloat16", "max_prompt_tokens": 1024, "batch_size": 1, "queue_size": 64},
     "7b-bf16-batch": {"invariance": True, "model": "7b", "engine": "tensorpilot", "execution": "batch", "quantization": "none",
-                      "dtype": "bfloat16", "max_prompt_tokens": 1024, "batch_size": 64, "queue_size": 192},
+                      "dtype": "bfloat16", "max_prompt_tokens": 1024, "batch_size": 48, "queue_size": 192},
     "7b-bf16-long": {"model": "7b", "engine": "tensorpilot", "execution": "batch", "quantization": "none",
-                     "dtype": "bfloat16", "max_prompt_tokens": 2048, "batch_size": 32, "queue_size": 64},
+                     "dtype": "bfloat16", "max_prompt_tokens": 2048, "batch_size": 24, "queue_size": 64},
     "14b-nf4-batch": {"invariance": True, "model": "14b", "engine": "tensorpilot", "execution": "batch", "quantization": "nf4",
-                      "dtype": "bfloat16", "max_prompt_tokens": 1024, "batch_size": 64, "queue_size": 192},
+                      "dtype": "bfloat16", "max_prompt_tokens": 1024, "batch_size": 28, "queue_size": 192},
     "14b-nf4-long": {"model": "14b", "engine": "tensorpilot", "execution": "batch", "quantization": "nf4",
-                     "dtype": "bfloat16", "max_prompt_tokens": 2048, "batch_size": 16, "queue_size": 64},
+                     "dtype": "bfloat16", "max_prompt_tokens": 2048, "batch_size": 12, "queue_size": 64},
     "vllm-7b-bf16": {"model": "7b", "engine": "vllm", "execution": "batch", "quantization": "none",
-                     "dtype": "bfloat16", "max_prompt_tokens": 1024, "batch_size": 64, "queue_size": 192},
+                     "dtype": "bfloat16", "max_prompt_tokens": 1024, "batch_size": 48, "queue_size": 192},
     "vllm-14b-nf4": {"model": "14b", "engine": "vllm", "execution": "batch", "quantization": "nf4",
-                     "dtype": "bfloat16", "max_prompt_tokens": 1024, "batch_size": 64, "queue_size": 192},
+                     "dtype": "bfloat16", "max_prompt_tokens": 1024, "batch_size": 28, "queue_size": 192},
 }
 
 
@@ -217,11 +224,35 @@ def stage_env(stage):
     return env
 
 
+QUICK_EXPERIMENT_CAP_MINUTES = 3
+
+
+def quick_experiments(stage, cold):
+    """quick-c1 and quick-c8 are identical in the serial and batched stages, so the two can be compared directly."""
+    model, execution = STAGES[stage]["model"], STAGES[stage]["execution"]
+    items = [cold, closed(model, execution, "quick-c1", 1, 24, SHORT, warmup=2,
+                          description="one client: batching must not slow a single stream"),
+             closed(model, execution, "quick-c8", 8, 64, SHORT, warmup=2,
+                    description="eight clients: queued behind one sequence (serial) or decoded together (batch)")]
+    if execution == "batch":
+        items += [closed(model, execution, "quick-c32", 32, 128, SHORT, warmup=2,
+                         description="thirty-two clients decoding together"),
+                  closed(model, execution, "quick-c128", 128, 256, SHORT, warmup=2,
+                         description="as many clients as the pool has slots: every slot busy at once"),
+                  closed(model, execution, "quick-cancel", 32, 96, CANCEL, warmup=2, abort_error_rate=0.5,
+                         description="30% of clients abandon their request: cleanup of a shared batch")]
+    for item in items:
+        item["max_minutes"] = min(item["max_minutes"], QUICK_EXPERIMENT_CAP_MINUTES)
+    return items
+
+
 def experiments_for(stage):
     s = STAGES[stage]
     model, execution = s["model"], s["execution"]
     cold = closed(model, execution, "cold-start", 1, 8, SHORT, warmup=0, slo=False, abort_error_rate=0.5,
                   description="the first requests after readiness, before any warmup request: cold-start latency")
+    if "-quick-" in stage:
+        return quick_experiments(stage, cold)
     if stage == "0.5b-serial":
         legacy = {"prompt_tokens": 17, "output_tokens": 32}
         regression = spec(10, [{"name": "regression", "prompt_tokens": legacy["prompt_tokens"],

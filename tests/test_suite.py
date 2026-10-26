@@ -109,7 +109,7 @@ def test_no_prompt_exceeds_the_stages_configured_limit_and_outputs_stay_within_t
 
 @pytest.mark.parametrize("stage", [s for s in suite.stage_names() if suite.STAGES[s]["engine"] == "tensorpilot"
                                    and suite.STAGES[s]["execution"] == "batch"])
-def test_every_batching_stage_has_a_kv_pool_that_fits_the_4090(stage):
+def test_every_batching_stage_is_fully_granted_its_slots_with_a_planned_margin_inside_the_allocator_cap(stage):
     parameters = suite.STAGES[stage]
     key = parameters["model"]
     verdict = assess(model_config(key), repo=suite.MODELS[key]["repo"], revision="r" * 40, license="apache-2.0",
@@ -117,17 +117,43 @@ def test_every_batching_stage_has_a_kv_pool_that_fits_the_4090(stage):
                      prompt_tokens=parameters["max_prompt_tokens"], output_tokens=512,
                      requested_capacity=parameters["batch_size"], quantization=parameters["quantization"])
     assert verdict["verdict"] == "fits", verdict.get("reason")
-    assert verdict["rows_granted"] >= min(parameters["batch_size"], 12), \
-        f"{stage}: only {verdict['rows_granted']} slots fit; the stage's concurrency points would be meaningless"
+    assert verdict["rows_granted"] == parameters["batch_size"], \
+        f"{stage} asks for {parameters['batch_size']} slots but the planner grants {verdict['rows_granted']}"
+    margin = verdict["allocator_cap_gib"] - verdict["weights_gib"] - verdict["pool_gib"]
+    assert margin >= 2.4, f"{stage}: only {margin:.2f} GiB would remain inside the allocator cap after weights and the pool"
 
 
-def test_the_14b_stage_requests_more_slots_than_it_can_hold_and_the_suite_says_so():
-    stage = suite.STAGES["14b-nf4-batch"]
-    verdict = assess(model_config("14b"), repo="m", revision="r" * 40, license="x", weights_bytes=DOWNLOAD_BYTES["14b"],
+def test_the_kv_pool_never_leaves_less_than_the_stated_headroom_even_when_more_slots_are_requested():
+    stage = suite.STAGES["7b-bf16-batch"]
+    verdict = assess(model_config("7b"), repo="m", revision="r" * 40, license="x", weights_bytes=DOWNLOAD_BYTES["7b"],
                      gpu_total_bytes=RTX_4090, dtype="bfloat16", prompt_tokens=stage["max_prompt_tokens"],
-                     output_tokens=512, requested_capacity=stage["batch_size"], quantization="nf4")
-    assert verdict["rows_granted"] < stage["batch_size"] and verdict["pool_limited_by"] == "vram"
-    assert 20 <= verdict["rows_granted"] <= 40
+                     output_tokens=512, requested_capacity=128, quantization="none")
+    assert verdict["rows_granted"] < 128 and verdict["pool_limited_by"] == "vram"
+    assert verdict["allocator_cap_gib"] - verdict["weights_gib"] - verdict["pool_gib"] >= 2.4
+
+
+def test_the_14b_stage_cannot_reach_the_128_client_point_with_its_slots_and_says_so():
+    stage = suite.STAGES["14b-nf4-batch"]
+    assert stage["batch_size"] < 128 and suite.MODELS["14b"]["slots"] == stage["batch_size"]
+
+
+@pytest.mark.parametrize("stage", ["0.5b-quick-serial", "0.5b-quick-batch"])
+def test_the_quick_stages_are_short_and_each_experiment_is_capped_at_three_minutes(stage):
+    config = CONFIGS[stage]
+    assert all(e["max_minutes"] <= 3 for e in config["experiments"])
+    env = suite.stage_env(stage)
+    assert env["V10_CAP_MINUTES"] <= (12 if stage.endswith("serial") else 32)
+    assert env["V10_EXPECTED_MINUTES"] < 15
+
+
+def test_the_quick_serial_and_batch_stages_run_identical_c1_and_c8_experiments():
+    serial = {e["id"]: e for e in CONFIGS["0.5b-quick-serial"]["experiments"]}
+    batch = {e["id"]: e for e in CONFIGS["0.5b-quick-batch"]["experiments"]}
+    for name in ("quick-c1", "quick-c8", "cold-start"):
+        keep = ("requests", "concurrency", "repeats", "warmup_requests", "workload_spec", "timeout_s", "slo")
+        assert {k: serial[name].get(k) for k in keep} == {k: batch[name].get(k) for k in keep}, name
+    assert {"quick-c32", "quick-c128", "quick-cancel"} <= set(batch) and not {"quick-c32"} & set(serial)
+    assert suite.stage_env("0.5b-quick-batch")["V10_INVARIANCE"] == 1
 
 
 def test_slo_thresholds_scale_with_model_size_and_the_overload_run_has_none():

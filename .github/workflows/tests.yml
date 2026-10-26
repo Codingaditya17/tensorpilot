@@ -26,6 +26,8 @@ jobs:
                  TENSORPILOT_REVISION=7ae557604adf67be50417f59c2c2f167def9a775
           deploy/runpod/scale_session.sh --list > /dev/null
           deploy/runpod/scale_session.sh --plan 14b-nf4-batch > /dev/null
+          deploy/runpod/scale_session.sh --plan 0.5b-quick-serial > /dev/null
+          deploy/runpod/scale_session.sh --plan 0.5b-quick-batch > /dev/null
           deploy/runpod/session.sh --plan > /dev/null
           deploy/runpod/two_gpu_session.sh --plan > /dev/null
           env -u TENSORPILOT_API_KEY -u TENSORPILOT_CONTROL_API_KEY -u TENSORPILOT_DATA_API_KEY deploy/runpod/first-run.sh --plan > /dev/null

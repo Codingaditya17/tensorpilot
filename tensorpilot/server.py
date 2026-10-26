@@ -267,7 +267,7 @@ def main():
                         help="maximum active batch sequences (1..8 for MLX; 1..256 for CUDA, reduced to fit the KV pool)")
     parser.add_argument("--kv-budget-gib", type=float, default=0,
                         help="CUDA batch: KV slot pool budget in GiB; 0 sizes it from free VRAM")
-    parser.add_argument("--kv-headroom-gib", type=float, default=1.5,
+    parser.add_argument("--kv-headroom-gib", type=float, default=2.5,
                         help="CUDA batch: VRAM kept free of weights and KV for activations and allocator overhead")
     parser.add_argument("--prefill-step-size", type=int, default=256, help="batch prefill segmentation (1..2048)")
     parser.add_argument("--adaptive-latency-target", type=float, default=.25,

@@ -31,8 +31,8 @@ All Apache-2.0. Estimates come from the checkpoint's `config.json` and file size
 | Role | Model @ revision | Precision | Weights resident | KV per token | Slots at 1,536-token rows | Verdict (estimated) |
 |---|---|---|---|---|---|---|
 | Regression and performance baseline | Qwen2.5-0.5B-Instruct @ 7ae5576… | fp16 | 0.92 GiB | 12 KiB | 128 | fits |
-| **Primary larger model** | **Qwen2.5-7B-Instruct @ a09a354…** | **bf16** | **14.19 GiB** | **56 KiB** | **64 (limit: KV budget 5.5 GiB)** | fits, with about 0.15 GiB to spare at 64 slots |
-| **Stretch model** | **Qwen2.5-14B-Instruct @ cf98f3b…** | **NF4** | **9.25 GiB** (27.51 GiB download) | **192 KiB** | **34 (limit: VRAM)** | fits, with fewer slots |
+| **Primary larger model** | **Qwen2.5-7B-Instruct @ a09a354…** | **bf16** | **14.19 GiB** | **56 KiB** | **53 (limit: VRAM); the stages use 48** | fits; the stage's 48 slots leave an estimated 2.97 GiB free inside the allocator cap |
+| **Stretch model** | **Qwen2.5-14B-Instruct @ cf98f3b…** | **NF4** | **9.25 GiB** (27.51 GiB download) | **192 KiB** | **31 (limit: VRAM); the stages use 28** | fits, with fewer slots |
 | (reference only) | Qwen2.5-14B-Instruct | bf16 | 27.51 GiB | 192 KiB | 0 | **does not fit** (cap is 21.17 GiB) |
 | (refused) | Qwen3-8B | any | – | – | – | unsupported architecture (the forward pass does not implement Qwen3's QK-norm) |
 
@@ -48,6 +48,32 @@ Long-context prompts are capped at **2,048 tokens**, the most the service accept
 16,384-byte prompt limit). The suite refuses to generate a longer prompt; an earlier draft declared 4,096 and would have silently
 produced 2,700.
 
+### Memory safety margin
+
+The planner never grants a KV pool that leaves less than **2.5 GiB** free inside the allocator cap (90% of the card, 21.17 GiB) after weights and pool: room for
+activations, allocator fragmentation and quantization scratch. An earlier draft requested 64 slots for 7B, which left an estimated 1.66 GiB; that was too thin for a number nobody had
+measured on CUDA, so the stages now request only what leaves at least 2.4 GiB (7B: 48 slots, 2.97 GiB; 14B NF4: 28 slots, about 2.8 GiB) and a test enforces it. These are still planning
+arithmetic, so the stage runner also **measures** the real margin before benchmarking (`tensorpilot.memory_gate`, run after the smoke test): it reads the worker's own peak
+reserved bytes and granted slots and stops the stage if the margin is under 1.5 GiB, the pool is smaller than requested, an OOM was recorded, or the numbers are missing. The gate sees
+weights, pool and smoke-test activations, not the heavier activations of a 48-way prefill burst; the telemetry records the peak through every experiment and any OOM aborts the experiment.
+
+## The first, short GPU session (recommended before anything else)
+
+Two stages on the 0.5B model, each experiment capped at three minutes, that answer one question: **does CUDA continuous batching run, stay correct, and beat the serial worker?**
+`quick-c1` and `quick-c8` are identical in both stages (same workload, seed, request counts), so the comparison is direct.
+
+| Stage | Experiments | Expected min | Hard cap min |
+|---|---|---|---|
+| `0.5b-quick-serial` | cold start, `quick-c1`, `quick-c8` | 2.8 | 9 |
+| `0.5b-quick-batch` | the same three, plus `quick-c32`, `quick-c128` (every slot busy) and `quick-cancel` (30% of clients abandon), preceded by a batch-invariance check | 7.4 (+3 for the invariance check) | 28 (including 10 for the invariance check) |
+
+`python -m tensorpilot.quick_compare SERIAL_DIR BATCH_DIR` then reads only the two evidence directories and applies criteria fixed before any measurement: batched c=8 throughput at least 1.5× serial
+c=8, batched c=1 at least 0.7× serial c=1, at least 90% of requests identical to their solo output, no failed request, every experiment completed, the memory gate passed, neither stage interrupted.
+**Passing means the 7B session is worth its cost; it is not a performance result.** Failing means stop and bring the evidence back.
+
+Estimated cost of this session at the quoted ~$0.90/hour (an assumption): about 25 minutes including boot, the 0.5B download, four model loads and export, so **about $0.40 expected**; the hard caps
+and load timeouts bound the plan at about 112 minutes (**about $1.70**) if you terminate when it ends. A container that exits at its lifetime backstop is not assumed to stop billing: only terminating the Pod does.
+
 ## Stages, expected time and hard caps
 
 Expected minutes come from a stated model: single-stream decode rate × a batching-efficiency exponent of 0.8. The 0.5B rate (58 tok/s)
@@ -55,18 +81,19 @@ was measured; **the 7B (40) and 14B (25) rates are assumptions.** The cap per ex
 
 | Stage | Experiments | Expected min | Hard cap min |
 |---|---|---|---|
+| `0.5b-quick-serial` / `0.5b-quick-batch` | 3 / 6 | 2.8 / 7.4 | 9 / 28 |
 | `0.5b-serial` | 3 | 5.0 | 21 |
 | `0.5b-batch` | 15 | 32.6 | 124 |
 | `7b-bf16-serial` | 3 | 5.5 | 22 |
-| `7b-bf16-batch` | 15 | 47.7 | 160 |
+| `7b-bf16-batch` | 15 | 48.9 | 163 |
 | `7b-bf16-long` | 5 | 12.6 | 44 |
-| `14b-nf4-batch` | 13 | 71.7 | 214 |
+| `14b-nf4-batch` | 13 | 74.5 | 220 |
 | `14b-nf4-long` | 4 | 14.4 | 47 |
-| `vllm-7b-bf16` | 9 | 36.8 | 115 |
-| `vllm-14b-nf4` | 9 | 62.8 | 179 |
+| `vllm-7b-bf16` | 9 | 37.9 | 118 |
+| `vllm-14b-nf4` | 9 | 65.3 | 185 |
 | `quality-7b` / `quality-14b` | – | 14 / 12 | 40 / 45 |
 | `faults-0.5b` / `faults-7b` | – | 5 / 12 | 20 / 50 |
-| **Total** | | **332** | **1,081** |
+| **Total** | | **350** | **1,136** |
 
 Regenerate with `python -m tensorpilot.suite --plan`. The batching stages include a ten-minute batch-invariance check inside their caps.
 
@@ -78,16 +105,32 @@ repeated in session B because a Pod's volume does not survive termination).
 
 | Session | Stages | Stage minutes (expected) | Overhead assumed | Expected | Recommended `SESSION_BUDGET_MINUTES` | Bounded worst case |
 |---|---|---|---|---|---|---|
-| A | `0.5b-serial`, `0.5b-batch`, `7b-bf16-serial`, `7b-bf16-batch`, `quality-7b`, `faults-0.5b`, `faults-7b`, then `vllm-7b-bf16` | 159 | 63 min (boot, 7B download, eight loads, vLLM install, export) | 3.7 h, **$3.3** | 360 | ≤ 7.4 h, **$6.7** |
-| B | `7b-bf16-long`, `14b-nf4-batch`, `14b-nf4-long`, `quality-14b`, then `vllm-14b-nf4` | 174 | 87 min (7B and 14B downloads, slow 14B loads, vLLM install, export) | 4.3 h, **$3.9** | 360 | ≤ 7.8 h, **$7.0** |
-| | | | | **8.0 h, about $7.2** | | **≤ 15.2 h, about $13.7** |
+| A | `0.5b-serial`, `0.5b-batch`, `7b-bf16-serial`, `7b-bf16-batch`, `quality-7b`, `faults-0.5b`, `faults-7b`, then `vllm-7b-bf16` | 161 | 63 min (boot, 7B download, eight loads, vLLM install, export) | 3.7 h, **$3.4** | 360 | ≤ 7.4 h, **$6.7** |
+| B | `7b-bf16-long`, `14b-nf4-batch`, `14b-nf4-long`, `quality-14b`, then `vllm-14b-nf4` | 179 | 87 min (7B and 14B downloads, slow 14B loads, vLLM install, export) | 4.4 h, **$4.0** | 360 | ≤ 7.8 h, **$7.0** |
+| | | | | **8.2 h, about $7.4** | | **≤ 15.2 h, about $13.7** |
+
+Add the quick session (about $0.40 expected, about $1.70 bounded) before session A if you want the cheapest evidence first; session A then repeats the 0.5B stages at full size, so skip
+`0.5b-serial` and `0.5b-batch` there if the quick session passed and you only want the larger comparisons.
+
+### The Pod's lifetime backstop
+
+The experiment image's container exits after `TENSORPILOT_POD_MAX_MINUTES` (default 120), so a 3.7–4.4 hour session cannot run on the default. The runbook sets it per session (first session
+150, session A 480, session B 540) and the stage runner enforces three things so the container can never take a stage's evidence with it:
+
+1. **Precondition.** `pod-entrypoint.sh` writes the real deadline to `/run/tensorpilot/pod-deadline-epoch`. A stage is refused unless the time remaining covers its hard cap, one model-load
+   limit and 12 minutes to archive. The check uses the remaining time, so a stage started late is refused even if the Pod was long enough at boot, and it fails closed if the deadline cannot be read.
+2. **Watchdog.** While a stage runs, the runner is signalled 12 minutes before the deadline wherever the stage is (downloading, loading, benchmarking): the running step is stopped and the partial evidence
+   archived, ledger written, exit status 125. This holds even if a download takes longer than planned.
+3. **Interruption.** SIGTERM, SIGINT (Ctrl-C), SIGHUP (a dropped SSH session) and the watchdog all take the same path: stop the child, stop the engine, archive what exists, write the ledger. The benchmark records an interrupted
+   experiment as aborted (reason `interrupted`) with its unfinished request journals, marks the rest skipped, and writes a complete manifest.
+
+Not covered: Runpod itself reclaiming or killing the container without notice, or `kill -9`. Raw stage directories live on `/workspace`, so they survive a stopped Pod on a persistent volume even if the archive step never ran.
 
 The ledger refuses a stage if the stage time already used plus that stage's hard cap would exceed the session budget, so stage time cannot exceed the budget. It does **not**
 bound time outside stages (boot, downloads, idle, SSH). The overhead column is an assumption; the worst-case column adds that overhead and 20 minutes of slack to the budget.
 **Stopping or exiting the engine does not stop billing: terminate the Pod.**
 
-If that is too much, the cheapest high-value subset is session A's `0.5b-serial`, `0.5b-batch` and `7b-bf16-batch` (about 85 expected minutes of stage time): it answers whether batching is
-correct and faster on a real GPU before anything larger is attempted.
+If that is too much, the quick session above is the cheapest meaningful step; after it, the cheapest 7B subset is `7b-bf16-batch` alone.
 
 **Disk:** the model cache holds 0.9 + 14.2 + 27.5 GiB, the vLLM environment about 15 GiB, and the image about 7 GiB: a 120 GB volume and a 50 GB container disk.
 RAM of at least 32 GB is recommended for loading the 14B shards.
@@ -147,7 +190,7 @@ however the stage ends.
 
 **GO for a first, bounded GPU session after your approval, and NO-GO for running everything at once.** The code is as verified as it can be without a GPU
 (tests locally and inside the Linux image, mutation-tested guards), but it has never executed on CUDA, so the first stage is the cheapest one that tests the riskiest assumption.
-Start with `0.5b-serial` (regression against the immutable baseline), then `0.5b-batch` (is batching correct and faster on a real GPU?). Proceed to 7B only if those pass, and to 14B and
+Start with the quick session (`0.5b-quick-serial`, then `0.5b-quick-batch`, then `quick_compare`). Proceed to 7B only if the quick gate passes, and to 14B and
 vLLM only after 7B behaves. Publishing the experiment image and renting hardware each need your explicit approval.
 
 ## Known limitations

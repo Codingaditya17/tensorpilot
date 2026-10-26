@@ -64,6 +64,7 @@ construction instead of being assumed to work.
 | Fail the whole worker on a step error | a half-failed shared batch cannot be trusted; the supervisor restarts it | an OOM in a step fails every in-flight request (requests are never silently retried) |
 | Prefill and decode alternate, not mixed in one pass | keeps phase timing separable and the code small | decode throughput halves while a prefill is pending |
 | Admission sized from the real KV bytes per token | the old flat 16 KiB/token guess is 3.5× off for 14B | admission is still an estimate; real memory is reported separately |
+| Pool sized to leave 2.5 GiB inside the allocator cap | weights, activations and fragmentation need room that nobody has measured on CUDA | fewer slots than a tighter policy would give (7B: 53 instead of 64); the stage runner checks the real margin after load |
 
 ### Not implemented, and not claimed
 

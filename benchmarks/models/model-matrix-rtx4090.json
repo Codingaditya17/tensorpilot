@@ -3,7 +3,7 @@
   "estimate_kind": "derived_from_config_and_file_sizes_not_measured",
   "gpu_total_bytes": 25252724736,
   "memory_fraction": 0.9,
-  "headroom_bytes": 1610612736,
+  "headroom_bytes": 2684354560,
   "models": [
     {
       "model": "Qwen/Qwen2.5-0.5B-Instruct",
@@ -31,31 +31,31 @@
       "rows_requested": 64,
       "pool_gib": 1.14,
       "pool_limited_by": "requested",
-      "kv_budget_gib": 18.75,
+      "kv_budget_gib": 17.75,
       "max_concurrent_sequences_by_context": {
         "512": {
           "row_gib": 0.006,
-          "max_concurrent_sequences": 3198,
+          "max_concurrent_sequences": 3027,
           "holds_128_concurrent": true
         },
         "1024": {
           "row_gib": 0.012,
-          "max_concurrent_sequences": 1598,
+          "max_concurrent_sequences": 1513,
           "holds_128_concurrent": true
         },
         "2048": {
           "row_gib": 0.023,
-          "max_concurrent_sequences": 798,
+          "max_concurrent_sequences": 756,
           "holds_128_concurrent": true
         },
         "4096": {
           "row_gib": 0.047,
-          "max_concurrent_sequences": 398,
+          "max_concurrent_sequences": 377,
           "holds_128_concurrent": true
         },
         "8192": {
           "row_gib": 0.094,
-          "max_concurrent_sequences": 198,
+          "max_concurrent_sequences": 188,
           "holds_128_concurrent": true
         }
       },
@@ -88,31 +88,31 @@
       "rows_requested": 64,
       "pool_gib": 1.14,
       "pool_limited_by": "requested",
-      "kv_budget_gib": 19.22,
+      "kv_budget_gib": 18.22,
       "max_concurrent_sequences_by_context": {
         "512": {
           "row_gib": 0.006,
-          "max_concurrent_sequences": 3278,
+          "max_concurrent_sequences": 3107,
           "holds_128_concurrent": true
         },
         "1024": {
           "row_gib": 0.012,
-          "max_concurrent_sequences": 1638,
+          "max_concurrent_sequences": 1553,
           "holds_128_concurrent": true
         },
         "2048": {
           "row_gib": 0.023,
-          "max_concurrent_sequences": 818,
+          "max_concurrent_sequences": 776,
           "holds_128_concurrent": true
         },
         "4096": {
           "row_gib": 0.047,
-          "max_concurrent_sequences": 408,
+          "max_concurrent_sequences": 387,
           "holds_128_concurrent": true
         },
         "8192": {
           "row_gib": 0.094,
-          "max_concurrent_sequences": 203,
+          "max_concurrent_sequences": 193,
           "holds_128_concurrent": true
         }
       },
@@ -140,35 +140,35 @@
       "activation_estimate_mib_prefill_chunk": 42.3,
       "verdict": "fits",
       "row_tokens": 1536,
-      "rows_granted": 64,
+      "rows_granted": 53,
       "rows_requested": 64,
-      "pool_gib": 5.33,
-      "pool_limited_by": "requested",
-      "kv_budget_gib": 5.48,
+      "pool_gib": 4.43,
+      "pool_limited_by": "vram",
+      "kv_budget_gib": 4.48,
       "max_concurrent_sequences_by_context": {
         "512": {
           "row_gib": 0.027,
-          "max_concurrent_sequences": 199,
+          "max_concurrent_sequences": 162,
           "holds_128_concurrent": true
         },
         "1024": {
           "row_gib": 0.055,
-          "max_concurrent_sequences": 99,
+          "max_concurrent_sequences": 80,
           "holds_128_concurrent": false
         },
         "2048": {
           "row_gib": 0.109,
-          "max_concurrent_sequences": 49,
+          "max_concurrent_sequences": 39,
           "holds_128_concurrent": false
         },
         "4096": {
           "row_gib": 0.219,
-          "max_concurrent_sequences": 24,
+          "max_concurrent_sequences": 19,
           "holds_128_concurrent": false
         },
         "8192": {
           "row_gib": 0.438,
-          "max_concurrent_sequences": 11,
+          "max_concurrent_sequences": 9,
           "holds_128_concurrent": false
         }
       },
@@ -201,31 +201,31 @@
       "rows_requested": 64,
       "pool_gib": 5.33,
       "pool_limited_by": "requested",
-      "kv_budget_gib": 14.12,
+      "kv_budget_gib": 13.12,
       "max_concurrent_sequences_by_context": {
         "512": {
           "row_gib": 0.027,
-          "max_concurrent_sequences": 515,
+          "max_concurrent_sequences": 478,
           "holds_128_concurrent": true
         },
         "1024": {
           "row_gib": 0.055,
-          "max_concurrent_sequences": 257,
+          "max_concurrent_sequences": 238,
           "holds_128_concurrent": true
         },
         "2048": {
           "row_gib": 0.109,
-          "max_concurrent_sequences": 128,
-          "holds_128_concurrent": true
+          "max_concurrent_sequences": 118,
+          "holds_128_concurrent": false
         },
         "4096": {
           "row_gib": 0.219,
-          "max_concurrent_sequences": 63,
+          "max_concurrent_sequences": 58,
           "holds_128_concurrent": false
         },
         "8192": {
           "row_gib": 0.438,
-          "max_concurrent_sequences": 31,
+          "max_concurrent_sequences": 28,
           "holds_128_concurrent": false
         }
       },
@@ -279,30 +279,30 @@
       "activation_estimate_mib_prefill_chunk": 40.8,
       "verdict": "fits",
       "row_tokens": 1536,
-      "rows_granted": 34,
+      "rows_granted": 31,
       "rows_requested": 64,
-      "pool_gib": 9.84,
+      "pool_gib": 9.0,
       "pool_limited_by": "vram",
-      "kv_budget_gib": 10.02,
+      "kv_budget_gib": 9.02,
       "max_concurrent_sequences_by_context": {
         "512": {
           "row_gib": 0.094,
-          "max_concurrent_sequences": 105,
+          "max_concurrent_sequences": 95,
           "holds_128_concurrent": false
         },
         "1024": {
           "row_gib": 0.188,
-          "max_concurrent_sequences": 52,
+          "max_concurrent_sequences": 47,
           "holds_128_concurrent": false
         },
         "2048": {
           "row_gib": 0.375,
-          "max_concurrent_sequences": 25,
+          "max_concurrent_sequences": 23,
           "holds_128_concurrent": false
         },
         "4096": {
           "row_gib": 0.75,
-          "max_concurrent_sequences": 12,
+          "max_concurrent_sequences": 11,
           "holds_128_concurrent": false
         },
         "8192": {

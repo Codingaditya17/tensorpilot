@@ -38,7 +38,7 @@ RUN python -m pip install --no-deps --no-cache-dir --force-reinstall /tmp/tensor
 COPY deploy/runpod /opt/tensorpilot/deploy/runpod
 COPY requirements-vllm.txt /opt/tensorpilot/requirements-vllm.txt
 COPY benchmarks/gpu /opt/tensorpilot/benchmarks/gpu
-COPY docs/v09-runpod-runbook.md docs/v09-runpod-experiment-pod.md /opt/tensorpilot/docs/
+COPY docs/v09-runpod-runbook.md docs/v09-runpod-experiment-pod.md docs/v10-runbook.md docs/v10-evaluation-plan.md /opt/tensorpilot/docs/
 COPY deploy/runpod/pod_sshd_config /etc/ssh/sshd_config
 RUN chmod 0755 /opt/tensorpilot/deploy/runpod/*.sh && chmod 0644 /etc/ssh/sshd_config
 

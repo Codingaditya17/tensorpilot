@@ -33,7 +33,10 @@ from .batch_backend import BatchStep
 
 SUPPORTED_MODEL_TYPES = ("qwen2", "llama")
 GIB = 1024**3
-DEFAULT_HEADROOM_BYTES = int(1.5 * GIB)
+# Free memory guaranteed inside the allocator cap after weights and the KV pool: activations, allocator fragmentation and any
+# quantization scratch. By construction the planner never grants a pool that leaves less than this. It is a planning margin,
+# not a measurement: the stage runner checks the real margin on the GPU before it benchmarks (tensorpilot.memory_gate).
+DEFAULT_HEADROOM_BYTES = int(2.5 * GIB)
 
 
 class UnsupportedModel(ValueError):

@@ -114,6 +114,10 @@ trap stop TERM INT
 
 echo "sshd ready on :22 as user $USER_NAME; evidence $RESULTS_ROOT; cache $CACHE_DIR; max Pod lifetime ${MAX_MINUTES} minutes" >&2
 deadline=$((SECONDS + MAX_MINUTES * 60))
+# Publish the deadline so a stage runner can refuse a stage that could not finish before the container exits.
+mkdir -p /run/tensorpilot
+printf '%s\n' "$(( $(date +%s) + MAX_MINUTES * 60 ))" >/run/tensorpilot/pod-deadline-epoch
+chmod 0755 /run/tensorpilot && chmod 0644 /run/tensorpilot/pod-deadline-epoch
 while kill -0 "$SSHD_PID" 2>/dev/null; do
   if (( SECONDS >= deadline )); then
     echo "maximum Pod lifetime reached; exiting so GPU billing stops. Terminate the Pod in the console." >&2

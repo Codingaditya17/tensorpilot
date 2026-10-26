@@ -17,7 +17,8 @@
 # Billing: stopping the engine does not stop billing. Terminate the Pod when the evidence is downloaded.
 #
 # Test hooks (CI dry runs on a CPU host only; they are inert unless V10_TEST_MODE=1 and print a banner):
-#   V10_WORKER_CMD, V10_VLLM_CMD, V10_CONFIG_OVERRIDE, V10_SKIP_GPU_CHECKS, V10_CAP_MINUTES_OVERRIDE, V10_PORT
+#   V10_WORKER_CMD, V10_VLLM_CMD, V10_CONFIG_OVERRIDE, V10_SKIP_GPU_CHECKS, V10_CAP_MINUTES_OVERRIDE, V10_PORT,
+#   V10_FORCE_MEMORY_GATE, V10_LIFETIME_MARGIN_OVERRIDE_MIN, V10_SKIP_LIFETIME_PRECHECK
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -117,21 +118,67 @@ gpu_checks() {  # stage_engine
   fi
 }
 
-# The experiment image exits its container when TENSORPILOT_POD_MAX_MINUTES elapses (a billing backstop). A session longer than
-# that would be killed mid-stage, so refuse to start unless the Pod will outlive the budget by an hour. Outside the experiment
-# image the variable is unset and there is nothing to check.
+# The experiment image exits its container when its lifetime backstop elapses, and pod-entrypoint.sh records that deadline in a file.
+# Two defenses keep a stage's evidence from dying with the container:
+#   1. pod_lifetime_check refuses to START a stage unless the real remaining time covers its hard cap, one model-load limit and
+#      the archive margin, so a stage that is already doomed to be cut short is not begun.
+#   2. a watchdog sends this runner SIGUSR1 LIFETIME_ARCHIVE_MARGIN_MIN minutes before the deadline wherever the stage is: the
+#      running step is stopped and the partial evidence is archived while the container is still up. This holds even when a model
+#      download or load takes longer than planned, so the check above can use a realistic bound instead of the worst case.
+# Outside the experiment image there is no backstop and neither defense does anything.
+LIFETIME_ARCHIVE_MARGIN_MIN=12
+pod_deadline_file() { echo "${TENSORPILOT_POD_DEADLINE_FILE:-/run/tensorpilot/pod-deadline-epoch}"; }
+lifetime_margin_min() {
+  if [[ $TEST_MODE -eq 1 && -n "${V10_LIFETIME_MARGIN_OVERRIDE_MIN:-}" ]]; then echo "$V10_LIFETIME_MARGIN_OVERRIDE_MIN"; else echo "$LIFETIME_ARCHIVE_MARGIN_MIN"; fi
+}
+
 pod_lifetime_check() {
-  local life="${TENSORPILOT_POD_MAX_MINUTES:-}"
-  [[ -z "$life" ]] && return 0
-  python3 - "$life" "$SESSION_BUDGET_MINUTES" <<'PY'
-import sys
-life, budget = map(float, sys.argv[1:3])
-if life < budget + 60:
-    print(f"refused: this Pod's lifetime backstop is {life:.0f} minutes (TENSORPILOT_POD_MAX_MINUTES) but the session budget is "
-          f"{budget:.0f} minutes. The container would exit mid-stage. Set the backstop to at least {budget + 60:.0f} in the Pod "
-          "template, or lower SESSION_BUDGET_MINUTES.", file=sys.stderr)
+  local file
+  file="$(pod_deadline_file)"
+  if [[ ! -f "$file" ]]; then
+    [[ -z "${TENSORPILOT_POD_MAX_MINUTES:-}" ]] && return 0
+    echo "refused: TENSORPILOT_POD_MAX_MINUTES is set but the Pod deadline file $file is missing, so the remaining lifetime cannot be" \
+         "verified" >&2
+    return 1
+  fi
+  [[ $TEST_MODE -eq 1 && "${V10_SKIP_LIFETIME_PRECHECK:-}" == "1" ]] && return 0
+  python3 - "$file" "$V10_CAP_MINUTES" "$V10_READY_TIMEOUT_S" "$(lifetime_margin_min)" <<'PY'
+import sys, time
+path, cap, ready_s, margin = sys.argv[1:5]
+try:
+    deadline = float(open(path).read().strip())
+except (OSError, ValueError):
+    print(f"refused: the Pod deadline file {path} is unreadable, so the remaining lifetime cannot be verified", file=sys.stderr)
     sys.exit(1)
+remaining = (deadline - time.time()) / 60
+need = float(cap) + float(ready_s) / 60 + float(margin)
+if remaining < need:
+    print(f"refused: this Pod's lifetime backstop leaves {remaining:.0f} minutes but this stage needs about {need:.0f} "
+          f"({float(cap):.0f} hard cap + {float(ready_s) / 60:.0f} model-load limit + {float(margin):.0f} to archive). Starting it "
+          "would have the container exit mid-stage. Terminate this Pod and start one with a larger "
+          "TENSORPILOT_POD_MAX_MINUTES, or choose a shorter stage.", file=sys.stderr)
+    sys.exit(1)
+print(f"pod lifetime: {remaining:.0f} minutes remain, this stage needs about {need:.0f}", file=sys.stderr)
 PY
+}
+
+WATCHDOG_PID=""
+start_lifetime_watchdog() {
+  local file seconds parent=$$
+  file="$(pod_deadline_file)"
+  [[ -f "$file" ]] || return 0
+  seconds="$(python3 -c "import sys, time; print(max(0.0, float(open(sys.argv[1]).read()) - time.time() - float(sys.argv[2]) * 60))" \
+             "$file" "$(lifetime_margin_min)")" || return 0
+  log "lifetime watchdog: this stage will be stopped and archived $(lifetime_margin_min) minutes before the Pod's deadline, in ${seconds%.*} s if still running"
+  ( sleep "$seconds"; kill -USR1 "$parent" ) >/dev/null 2>&1 &
+  WATCHDOG_PID=$!
+}
+
+stop_lifetime_watchdog() {
+  [[ -n "$WATCHDOG_PID" ]] || return 0
+  pkill -P "$WATCHDOG_PID" 2>/dev/null || true
+  kill "$WATCHDOG_PID" 2>/dev/null || true
+  WATCHDOG_PID=""
 }
 
 check_disk() {
@@ -239,6 +286,38 @@ engine_command_vllm() {
   printf '%s\n' "${command[@]}"
 }
 
+# Every long step runs as a background child that the shell waits on. A signal then reaches the trap at once (bash defers traps
+# while a foreground command runs), so an interrupt stops the step and still archives what it produced.
+CHILD_PID=""
+TAIL_PID=""
+# GUARD_OUT=file run_guarded ... sends only the child's output to that file; the trap and finalize logs stay on the terminal.
+run_guarded() {
+  if [[ -n "${GUARD_OUT:-}" ]]; then
+    "$@" >>"$GUARD_OUT" 2>&1 &
+  else
+    "$@" &
+  fi
+  CHILD_PID=$!
+  local rc=0
+  wait "$CHILD_PID" || rc=$?
+  CHILD_PID=""
+  return $rc
+}
+
+stop_child() {
+  [[ -n "$CHILD_PID" ]] || return 0
+  local pid="$CHILD_PID" waited=0
+  kill -TERM "$pid" 2>/dev/null || true
+  while kill -0 "$pid" 2>/dev/null && (( waited < 75 )); do sleep 1; waited=$((waited + 1)); done
+  if kill -0 "$pid" 2>/dev/null; then
+    log "step $pid ignored SIGTERM for 75 s; killing it and its children"
+    pkill -KILL -P "$pid" 2>/dev/null || true
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  wait "$pid" 2>/dev/null || true
+  CHILD_PID=""
+}
+
 ENGINE_PID=""
 start_engine() {  # engine
   local -a command
@@ -259,16 +338,19 @@ cleanup_engine() {
 run_smoke() {  # engine url
   local extra=()
   [[ "$1" == "vllm" ]] && extra=(--api openai --model-name "$V10_MODEL_REPO")
-  python3 -m tensorpilot.load --url "$2" --requests 5 --concurrency 1 --max-tokens 16 --timeout 120 \
+  run_guarded python3 -m tensorpilot.load --url "$2" --requests 5 --concurrency 1 --max-tokens 16 --timeout 120 \
     "${extra[@]}" --output "$STAGE_DIR/smoke.json" --journal "$STAGE_DIR/smoke.requests.jsonl" || true
-  python3 -m tensorpilot.smoke_check "$STAGE_DIR/smoke.json" --expect 5 --log "$STAGE_DIR/engine.log"
+  run_guarded python3 -m tensorpilot.smoke_check "$STAGE_DIR/smoke.json" --expect 5 --log "$STAGE_DIR/engine.log"
 }
+
+# The gate reads a real GPU's allocator numbers, so a CPU dry run skips it unless a test forces it (a stub then fails it closed).
+memory_gate_applies() { ! skip_gpu || [[ $TEST_MODE -eq 1 && "${V10_FORCE_MEMORY_GATE:-}" == "1" ]]; }
 
 stage_benchmark() {  # engine
   local engine="$1" url="http://127.0.0.1:$PORT" status=0
   if [[ "$engine" == "tensorpilot" ]] && ! skip_gpu; then
     log "preflight (downloads the model if it is not cached)"
-    timeout --signal=TERM --kill-after=30 "${V10_READY_TIMEOUT_S}s" python3 -m tensorpilot.gpu_preflight \
+    run_guarded timeout --signal=TERM --kill-after=30 "${V10_READY_TIMEOUT_S}s" python3 -m tensorpilot.gpu_preflight \
       --model "$V10_MODEL_REPO" --revision "$V10_REVISION" --cache-dir "$CACHE" --dtype "$V10_DTYPE" \
       --quantization "$V10_QUANT" --max-prompt-tokens "$V10_MAX_PROMPT_TOKENS" \
       --output "$STAGE_DIR/preflight.json" --traceback-file "$STAGE_DIR/preflight.traceback.txt" || return $?
@@ -280,17 +362,31 @@ stage_benchmark() {  # engine
   if [[ "$engine" == "vllm" ]]; then probe="$url/v1/models"; key="$TENSORPILOT_API_KEY"; fi
   wait_ready "$probe" "$ENGINE_PID" "$V10_READY_TIMEOUT_S" "$key" || { tail -20 "$STAGE_DIR/engine.log" >&2; return 1; }
   run_smoke "$engine" "$url" || return 1
+  if [[ "$engine" == "tensorpilot" && "$V10_EXECUTION" == "batch" ]] && memory_gate_applies; then
+    # Measured, not planned: the real free memory inside the allocator cap and the slots actually granted.
+    log "memory gate: measured margin and granted slots"
+    run_guarded python3 -m tensorpilot.memory_gate --url "$url" --expect-rows "$V10_BATCH_SIZE" \
+      --min-margin-gib "${V10_MIN_MARGIN_GIB:-1.5}" --output "$STAGE_DIR/memory-gate.json" ||
+      { echo "the memory gate failed: the stage's pool or margin is not what the plan assumed; not benchmarking" >&2; return 1; }
+  fi
   if [[ "${V10_INVARIANCE:-0}" == "1" && "$engine" == "tensorpilot" ]]; then
     log "batch-invariance: does a request's output depend on what else is in the batch?"
-    timeout --signal=TERM --kill-after=30 10m python3 -m tensorpilot.batch_invariance --url "$url" --prompts 32 \
+    run_guarded timeout --signal=TERM --kill-after=30 10m python3 -m tensorpilot.batch_invariance --url "$url" --prompts 32 \
       --output "$STAGE_DIR/invariance.json" || log "the invariance check did not complete; the benchmark continues"
   fi
   # The runner stops starting experiments one minute before the hard kill, so a normal overrun ends cleanly.
   local soft
   soft="$(python3 -c "cap = float('$V10_CAP_MINUTES'); print(cap - 1 if cap > 2 else cap)")"
   log "benchmark: $V10_CONFIG, soft stop at ${soft} minutes, hard cap ${V10_CAP_MINUTES}"
-  timeout --signal=TERM --kill-after=60 "${V10_CAP_MINUTES}m" python3 -m tensorpilot.gpu_bench run "$V10_CONFIG" \
-    --url "$url" --output-dir "$STAGE_DIR/bench" --session-minutes "$soft" | tee "$STAGE_DIR/bench-run.log" || status=$?
+  : >"$STAGE_DIR/bench-run.log"
+  tail -n +1 -F "$STAGE_DIR/bench-run.log" 2>/dev/null &
+  TAIL_PID=$!
+  GUARD_OUT="$STAGE_DIR/bench-run.log" run_guarded timeout --signal=TERM --kill-after=60 "${V10_CAP_MINUTES}m" \
+    python3 -m tensorpilot.gpu_bench run "$V10_CONFIG" --url "$url" --output-dir "$STAGE_DIR/bench" \
+    --session-minutes "$soft" || status=$?
+  sleep 1
+  kill "$TAIL_PID" 2>/dev/null || true
+  TAIL_PID=""
   return $status
 }
 
@@ -299,16 +395,17 @@ stage_quality() {
   local cap="${V10_CAP_MINUTES}m"
   if [[ "$V10_MODEL_KEY" != "14b" ]]; then
     log "capturing the bf16 reference"
-    timeout --signal=TERM --kill-after=60 "$cap" python3 -m tensorpilot.quality capture "${common[@]}" \
+    run_guarded timeout --signal=TERM --kill-after=60 "$cap" python3 -m tensorpilot.quality capture "${common[@]}" \
       --output "$STAGE_DIR/reference-bf16.json" || return $?
     log "capturing NF4 against the reference"
-    timeout --signal=TERM --kill-after=60 "$cap" python3 -m tensorpilot.quality capture "${common[@]}" \
+    run_guarded timeout --signal=TERM --kill-after=60 "$cap" python3 -m tensorpilot.quality capture "${common[@]}" \
       --quantization nf4 --reference "$STAGE_DIR/reference-bf16.json" --output "$STAGE_DIR/nf4.json" || return $?
-    python3 -m tensorpilot.quality compare "$STAGE_DIR/reference-bf16.json" "$STAGE_DIR/nf4.json" \
-      --output "$STAGE_DIR/comparison.json" | tee "$STAGE_DIR/comparison.txt"
+    GUARD_OUT="$STAGE_DIR/comparison.txt" run_guarded python3 -m tensorpilot.quality compare \
+      "$STAGE_DIR/reference-bf16.json" "$STAGE_DIR/nf4.json" --output "$STAGE_DIR/comparison.json" || return $?
+    cat "$STAGE_DIR/comparison.txt"
   else
     log "capturing 14B NF4 (absolute metrics only: no bf16 reference fits on this card)"
-    timeout --signal=TERM --kill-after=60 "$cap" python3 -m tensorpilot.quality capture "${common[@]}" \
+    run_guarded timeout --signal=TERM --kill-after=60 "$cap" python3 -m tensorpilot.quality capture "${common[@]}" \
       --quantization nf4 --output "$STAGE_DIR/nf4-absolute.json" || return $?
   fi
 }
@@ -330,7 +427,7 @@ stage_faults() {
       command+=("--worker-arg=$flag")
     done
   fi
-  timeout --signal=TERM --kill-after=60 "${V10_CAP_MINUTES}m" "${command[@]}"
+  run_guarded timeout --signal=TERM --kill-after=60 "${V10_CAP_MINUTES}m" "${command[@]}"
 }
 
 run_stage() {
@@ -358,31 +455,66 @@ PY
   skip_gpu || check_disk "$CACHE" "$V10_DOWNLOAD_GIB"
   STAGE_DIR="$SESSION/$stage-$(date -u +%Y%m%dT%H%M%SZ)"
   mkdir -p "$STAGE_DIR"
-  local started_epoch started_utc status=0 archive="" sha=""
+  local started_epoch started_utc
   started_epoch="$(date +%s)"
   started_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  trap 'cleanup_engine' EXIT
-  trap 'exit 143' TERM
-  trap 'exit 130' INT
+  STAGE_STATUS=""
+  STAGE_STARTED_EPOCH="$started_epoch" STAGE_STARTED_UTC="$started_utc" STAGE_LEDGER="$ledger" STAGE_NAME="$stage"
+  FINALIZED=0
+  trap 'finalize_stage $?' EXIT
+  trap 'on_signal TERM 143' TERM
+  trap 'on_signal INT 130' INT
+  trap 'on_signal HUP 129' HUP
+  trap 'on_signal USR1 125' USR1
+  start_lifetime_watchdog
   case "$V10_ENGINE" in
-    tensorpilot|vllm) stage_benchmark "$V10_ENGINE" || status=$? ;;
-    quality) stage_quality || status=$? ;;
-    faults) stage_faults || status=$? ;;
+    tensorpilot|vllm) stage_benchmark "$V10_ENGINE" || STAGE_STATUS=$? ;;
+    quality) stage_quality || STAGE_STATUS=$? ;;
+    faults) stage_faults || STAGE_STATUS=$? ;;
   esac
+  STAGE_STATUS="${STAGE_STATUS:-0}"
+  finalize_stage "$STAGE_STATUS"
+  return "$STAGE_STATUS"
+}
+
+# Runs exactly once, on a normal finish, a failure, or an interrupt: stop the step and the engine, archive whatever exists, write the ledger.
+finalize_stage() {
+  (( FINALIZED == 0 )) || return 0
+  FINALIZED=1
+  trap '' TERM INT HUP USR1  # nothing may interrupt the archive
+  stop_lifetime_watchdog
+  local status="${STAGE_STATUS:-${1:-1}}" archive="" sha="" used
+  stop_child
+  [[ -n "$TAIL_PID" ]] && { kill "$TAIL_PID" 2>/dev/null || true; TAIL_PID=""; }
   cleanup_engine
-  log "stage $stage finished with exit status $status; archiving evidence"
+  case "$status" in
+    143|130|129) log "stage $STAGE_NAME was interrupted (exit $status); archiving the partial evidence" ;;
+    125) log "stage $STAGE_NAME was stopped by the lifetime watchdog (exit 125); archiving the partial evidence" ;;
+    *) log "stage $STAGE_NAME finished with exit status $status; archiving evidence" ;;
+  esac
   if archive="$(archive_stage "$STAGE_DIR")"; then
     sha="$(cut -d' ' -f1 "$archive.sha256")"
   else
     archive=""
     (( status != 0 )) || status=1  # an unarchivable stage is a failed stage
   fi
-  ledger_append "$ledger" "$stage" "$started_utc" "$status" "$archive" "$sha" "$started_epoch" "$V10_CAP_MINUTES"
-  used="$(ledger_used_minutes "$ledger")"
+  ledger_append "$STAGE_LEDGER" "$STAGE_NAME" "$STAGE_STARTED_UTC" "$status" "$archive" "$sha" "$STAGE_STARTED_EPOCH" "$V10_CAP_MINUTES" ||
+    log "WARNING: the ledger entry could not be written"
+  used="$(ledger_used_minutes "$STAGE_LEDGER")"
   log "session ledger: $(cost_line "$used"); budget ${SESSION_BUDGET_MINUTES} minutes"
   log "evidence: ${archive:-NOT ARCHIVED}"
   log "THE POD IS STILL BILLING. Download the archive, then TERMINATE the Pod in the Runpod console."
-  return "$status"
+  STAGE_STATUS="$status"
+}
+
+on_signal() {  # signal_name exit_code
+  if [[ "$1" == USR1 ]]; then
+    log "the Pod's lifetime backstop is $(lifetime_margin_min) minutes away: stopping the running step; partial evidence will be archived"
+  else
+    log "received SIG$1: stopping the running step; partial evidence will be archived"
+  fi
+  STAGE_STATUS="$2"
+  exit "$2"
 }
 
 plan_stage() {
@@ -400,8 +532,8 @@ expected:        $V10_EXPECTED_MINUTES minutes of experiments (an assumption, no
 HARD CAP:        $V10_CAP_MINUTES minutes (the stage is stopped there and its evidence kept)
 model download:  about $V10_DOWNLOAD_GIB GiB into $CACHE (not billed separately, but the time is)
 PLAN
+  pod_lifetime_check || return 3
   if [[ -n "${SESSION_BUDGET_MINUTES:-}" ]]; then
-    pod_lifetime_check || return 3
     local used
     used="$(ledger_used_minutes "$(session_dir)/ledger.jsonl")"
     python3 - "$used" "$V10_CAP_MINUTES" "$SESSION_BUDGET_MINUTES" <<'PY' || return 3
