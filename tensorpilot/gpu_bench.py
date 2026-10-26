@@ -22,9 +22,9 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import load
+from . import load, telemetry
 from .reporting import write_json
-from .workloads import build_stress_workload, validate_workload
+from .workloads import build_spec_workload, build_stress_workload, validate_workload
 
 SCHEMA = "tensorpilot.gpu-experiments/v1"
 REVISION = re.compile(r"[0-9a-f]{40}")
@@ -33,7 +33,8 @@ PLANNED_KINDS = ("recovery_manual", "batch_width_planned", "two_gpu_planned")
 ALL_KINDS = RUNNABLE_KINDS + PLANNED_KINDS
 EXPERIMENT_KEYS = {"id", "kind", "status", "description", "requests", "concurrency", "prompt_repeats",
                    "max_tokens", "repeats", "warmup_requests", "timeout_s", "rates", "steps", "reason",
-                   "estimated_minutes", "minimum_gpus", "max_minutes", "abort_error_rate"}
+                   "estimated_minutes", "minimum_gpus", "max_minutes", "abort_error_rate", "workload_spec",
+                   "arrival", "burst_size", "slo", "telemetry"}
 LIMITATIONS = (
     "The worker executes one sequence at a time; concurrency above one measures queueing, not batched throughput.",
     "Client timings include loopback HTTP and streaming parse time on the load-generating host.",
@@ -42,6 +43,19 @@ LIMITATIONS = (
     "Planning estimates are assumptions and are never reported as measurements.",
     "GPU clocks, temperature and co-tenancy are recorded by nvidia-smi samples, not controlled.",
 )
+BATCH_LIMITATIONS = (
+    "The worker batches sequences in one forward pass over a fixed-slot KV pool (not paged); each active sequence "
+    "reserves a full row, so concurrency is bounded by slots rather than by tokens in use.",
+    "Client timings include loopback HTTP, a fresh connection per request and streaming parse time on the "
+    "load-generating host.",
+    "One model on one GPU; no multi-GPU or scaling claim.",
+    "CUDA peak memory is process-lifetime from the PyTorch caching allocator, not total device pressure.",
+    "Planning estimates are assumptions and are never reported as measurements.",
+    "GPU clocks, temperature and co-tenancy are recorded by nvidia-smi samples, not controlled.",
+)
+SMALL_SAMPLE = 100  # below this many completed requests, p95 and p99 are effectively the maximum
+COUNTERS = ("tensorpilot_jobs_total", "tensorpilot_rejected_requests_total", "tensorpilot_admission_decisions_total",
+            "tensorpilot_output_tokens_total", "tensorpilot_worker_stalls_total")
 DEFAULT_BUDGET_MINUTES = 300
 # Preflight, model load, warmup, evidence export and teardown, excluding experiment time.
 DEFAULT_SESSION_OVERHEAD_MINUTES = 45
@@ -67,6 +81,11 @@ def validate_config(config):
             raise ValueError(f"assumptions.{name} must be a positive number (planning only)")
     if assumptions.get("status") != "placeholder_unmeasured":
         raise ValueError("assumptions.status must be placeholder_unmeasured until a preflight measures them")
+    if "telemetry" in config:
+        sampling = config["telemetry"]
+        if not isinstance(sampling, dict) or set(sampling) - {"interval_s"} or (
+                "interval_s" in sampling and not (_positive_number(sampling["interval_s"]) and sampling["interval_s"] <= 60)):
+            raise ValueError("telemetry must be an object with interval_s in (0, 60]")
     if "max_session_minutes" in config and not _positive_number(config["max_session_minutes"]):
         raise ValueError("max_session_minutes must be a positive number")
     if "session_overhead_minutes" in config and not _positive_number(config["session_overhead_minutes"]):
@@ -102,7 +121,7 @@ def _validate_experiment(experiment):
         return
     if experiment.get("status") not in (None, "runnable"):
         raise ValueError(f"{identifier}: runnable experiments may not declare status {experiment['status']}")
-    checks = {"requests": (1, 2000), "concurrency": (1, 64), "prompt_repeats": (1, 256),
+    checks = {"requests": (1, 20000), "concurrency": (1, 256), "prompt_repeats": (1, 256),
               "max_tokens": (1, 512), "repeats": (1, 10), "warmup_requests": (0, 50),
               "timeout_s": (1, 120), "max_minutes": (1, 240)}
     if "abort_error_rate" in experiment:
@@ -114,9 +133,31 @@ def _validate_experiment(experiment):
     for field, (low, high) in checks.items():
         if field in experiment and not _bounded_int(experiment[field], low, high):
             raise ValueError(f"{identifier}: {field} must be an integer in {low}..{high}")
-    for required in ("requests", "prompt_repeats", "max_tokens"):
-        if required not in experiment:
-            raise ValueError(f"{identifier}: {required} is required")
+    if "workload_spec" in experiment:
+        try:
+            build_spec_workload(experiment["workload_spec"], 16)
+        except (ValueError, KeyError, TypeError) as exc:
+            raise ValueError(f"{identifier}: invalid workload_spec: {exc}") from exc
+        if not _positive_number(experiment.get("estimated_minutes")):
+            raise ValueError(f"{identifier}: a workload_spec experiment must declare estimated_minutes")
+        required = ("requests",)
+    else:
+        required = ("requests", "prompt_repeats", "max_tokens")
+    for name in required:
+        if name not in experiment:
+            raise ValueError(f"{identifier}: {name} is required")
+    if "arrival" in experiment:
+        if experiment["arrival"] not in ("uniform", "poisson", "burst") or kind not in ("open_loop", "saturation"):
+            raise ValueError(f"{identifier}: arrival is uniform, poisson or burst and only valid for open loops")
+    if "burst_size" in experiment and not _bounded_int(experiment["burst_size"], 1, 1024):
+        raise ValueError(f"{identifier}: burst_size must be an integer in 1..1024")
+    if "slo" in experiment:
+        slo = experiment["slo"]
+        if not isinstance(slo, dict) or not slo or set(slo) - {"ttft_s", "e2e_s", "tpot_s"} or not all(
+                _positive_number(v) for v in slo.values()):
+            raise ValueError(f"{identifier}: slo needs positive ttft_s, e2e_s and/or tpot_s")
+    if "telemetry" in experiment and type(experiment["telemetry"]) is not bool:
+        raise ValueError(f"{identifier}: telemetry must be true or false")
     if kind == "open_loop" or kind == "saturation":
         rates = experiment.get("rates")
         if not isinstance(rates, list) or not rates or len(rates) > 8 or not all(
@@ -140,6 +181,10 @@ def estimate(config, experiment):
     if experiment["kind"] in PLANNED_KINDS:
         minutes = experiment.get("estimated_minutes", 0) if experiment["kind"] == "recovery_manual" else 0
         return {"minutes": float(minutes), "note": "manual step; not run by this command"}
+    if "estimated_minutes" in experiment:
+        return {"minutes": float(min(experiment["estimated_minutes"], experiment.get("max_minutes",
+                                                                                  experiment["estimated_minutes"]))),
+                "note": "declared in the config; an assumption, not a measurement"}
     prompt_tokens = experiment["prompt_repeats"] * 17  # roughly 17 tokens per stress observation
     prefill_s = prompt_tokens / assumptions["prefill_tokens_per_s"]
     service_s = prefill_s + experiment["max_tokens"] / assumptions["decode_tokens_per_s"]
@@ -181,17 +226,63 @@ def config_fingerprint(config):
 
 
 def build_plan_for(experiment):
+    if "workload_spec" in experiment:
+        return validate_workload(build_spec_workload(experiment["workload_spec"], experiment["requests"]))
     return validate_workload(build_stress_workload(
         experiment["requests"], prompt_repeats=experiment["prompt_repeats"],
         output_tokens=experiment["max_tokens"]))
 
 
-def _namespace(url, plan_path, journal, *, requests, concurrency, rate, max_tokens, timeout):
+def _namespace(url, plan_path, journal, *, requests, concurrency, rate, max_tokens, timeout, arrival="uniform",
+               burst_size=8, slo=None, seed=42):
     return argparse.Namespace(
         url=url, requests=requests, concurrency=concurrency, rate=rate, max_tokens=max_tokens,
-        timeout=timeout, workload="uniform", workload_file=str(plan_path), seed=42, duration_s=None,
+        timeout=timeout, workload="uniform", workload_file=str(plan_path), seed=seed, duration_s=None,
         max_requests=requests, journal=str(journal), journal_fsync=False, compact=False,
-        overwrite=True)
+        overwrite=True, arrival=arrival, burst_size=burst_size, slo=slo)
+
+
+def limitations_for(server):
+    """The limitation text that matches how the worker actually executes; serial keeps its original wording."""
+    return list(BATCH_LIMITATIONS if (server or {}).get("execution_mode") in ("batch", "adaptive") else LIMITATIONS)
+
+
+def statistics_caveat(summary):
+    completed = summary.get("successful_requests", 0)
+    if completed < SMALL_SAMPLE:
+        return (f"small sample: {completed} completed requests (< {SMALL_SAMPLE}); p95 and p99 are effectively the "
+                "maximum and must not be quoted as tail-latency estimates")
+    return f"{completed} completed requests; percentiles are estimates from a single repeat unless repeats > 1"
+
+
+def parse_counters(text):
+    """Selected Prometheus counters as {'name{label=value}': float}; anything else is ignored."""
+    from prometheus_client.parser import text_string_to_metric_families
+    values = {}
+    for family in text_string_to_metric_families(text):
+        for sample in family.samples:
+            if sample.name in COUNTERS:
+                labels = ",".join(f"{k}={v}" for k, v in sorted(sample.labels.items()))
+                values[f"{sample.name}{{{labels}}}" if labels else sample.name] = sample.value
+    return values
+
+
+async def scrape_counters(url, api_key):
+    import aiohttp
+    headers = {"Authorization": "Bearer " + api_key} if api_key else {}
+    try:
+        async with aiohttp.ClientSession(headers=headers, timeout=aiohttp.ClientTimeout(total=5)) as session:
+            async with session.get(url + "/metrics") as response:
+                response.raise_for_status()
+                return parse_counters(await response.text())
+    except Exception:
+        return None
+
+
+def counter_delta(before, after):
+    if before is None or after is None:
+        return None
+    return {key: after[key] - before.get(key, 0) for key in after if after[key] != before.get(key, 0)}
 
 
 def _write_plan(directory, name, plan):
@@ -225,57 +316,100 @@ async def run_experiment(config, experiment, *, url, output_dir, config_sha256, 
     experiment_dir.mkdir(parents=True, exist_ok=False)
     timeout = experiment.get("timeout_s", 60)
     concurrency = experiment.get("concurrency", 1)
-    max_tokens = experiment["max_tokens"]
+    max_tokens = experiment.get("max_tokens", 512)
     abort_rate = experiment.get("abort_error_rate", DEFAULT_ABORT_ERROR_RATE)
     cap_s = min(experiment["max_minutes"] * 60, allowed_seconds)
     started = time.monotonic()
     artifacts, status, reason = [], "completed", None
     plan = build_plan_for(experiment)
-    if experiment.get("warmup_requests", 0):
-        warm_path = _write_plan(experiment_dir, "warmup", build_plan_for(
-            {**experiment, "requests": experiment["warmup_requests"]}))
-        journal = experiment_dir / "warmup.requests.jsonl"
-        await asyncio.wait_for(load.run(_namespace(
-            url, warm_path, journal, requests=experiment["warmup_requests"], concurrency=1, rate=0,
-            max_tokens=max_tokens, timeout=timeout)), cap_s)
-    if experiment["kind"] in ("open_loop", "saturation"):
-        labels = [(f"rate{str(rate).replace('.', 'p')}", rate) for rate in experiment["rates"]]
-    else:
-        labels = [("closed", 0)]
-    done = False
-    for repeat in range(1, experiment.get("repeats", 1) + 1):
-        for label, rate in labels:
-            remaining = cap_s - (time.monotonic() - started)
-            if remaining <= 0:
-                status, reason, done = "aborted", "time_cap", True
+    api_key = os.environ.get("TENSORPILOT_API_KEY")
+    extras = {"arrival": experiment.get("arrival", "uniform"), "burst_size": experiment.get("burst_size", 8),
+              "slo": experiment.get("slo")}
+    collector, overhead = None, None
+    if config.get("telemetry") and experiment.get("telemetry", True):
+        collector = telemetry.Collector(experiment_dir / "telemetry", url=url, api_key=api_key,
+                                        interval_s=config["telemetry"].get("interval_s", 1.0))
+        await collector.start()
+    try:
+        if experiment.get("warmup_requests", 0):
+            if collector:
+                collector.mark("warmup_start")
+            warm_path = _write_plan(experiment_dir, "warmup", build_plan_for(
+                {**experiment, "requests": experiment["warmup_requests"]}))
+            journal = experiment_dir / "warmup.requests.jsonl"
+            await asyncio.wait_for(load.run(_namespace(
+                url, warm_path, journal, requests=experiment["warmup_requests"], concurrency=1, rate=0,
+                max_tokens=max_tokens, timeout=timeout)), cap_s)
+            if collector:
+                collector.mark("warmup_end")
+        if experiment["kind"] in ("open_loop", "saturation"):
+            labels = [(f"rate{str(rate).replace('.', 'p')}", rate) for rate in experiment["rates"]]
+        else:
+            labels = [("closed", 0)]
+        done = False
+        for repeat in range(1, experiment.get("repeats", 1) + 1):
+            for label, rate in labels:
+                remaining = cap_s - (time.monotonic() - started)
+                if remaining <= 0:
+                    status, reason, done = "aborted", "time_cap", True
+                    break
+                name = f"repeat{repeat:02d}_{label}"
+                plan_path = _write_plan(experiment_dir, name, plan)
+                journal = experiment_dir / f"{name}.requests.jsonl"
+                args = _namespace(url, plan_path, journal, requests=len(plan), concurrency=concurrency,
+                                  rate=rate, max_tokens=max_tokens, timeout=timeout, **extras)
+                counters_before = await scrape_counters(url, api_key)
+                window_start = collector.now() if collector else None
+                if collector:
+                    collector.mark(f"{name}_start")
+                try:
+                    result = await asyncio.wait_for(load.run(args), remaining)
+                except TimeoutError:
+                    status, reason, done = "aborted", "time_cap", True
+                    if collector:
+                        collector.mark(f"{name}_aborted", reason="time_cap")
+                    break
+                if collector:
+                    collector.mark(f"{name}_end")
+                    result["telemetry"] = collector.window(window_start, collector.now())
+                result["server_counters_delta"] = counter_delta(counters_before, await scrape_counters(url, api_key))
+                result["experiment"] = {"id": experiment["id"], "kind": experiment["kind"], "repeat": repeat,
+                                        "arrival": label, "rate_per_s": rate or None,
+                                        "arrival_process": extras["arrival"] if rate else "closed_loop",
+                                        "description": experiment.get("description", "")}
+                result["config_sha256"] = config_sha256
+                result["target"] = config["target"]
+                result["limitations"] = limitations_for(result["metadata"].get("server"))
+                result["statistics_caveat"] = statistics_caveat(result["summary"])
+                report = experiment_dir / f"{name}.json"
+                write_json(report, result)
+                artifacts.append(report.name)
+                reason = _abort_reason(result, abort_rate)
+                if reason:
+                    status, done = "aborted", True
+                    break
+            if done:
                 break
-            name = f"repeat{repeat:02d}_{label}"
-            plan_path = _write_plan(experiment_dir, name, plan)
-            journal = experiment_dir / f"{name}.requests.jsonl"
-            args = _namespace(url, plan_path, journal, requests=len(plan), concurrency=concurrency,
-                              rate=rate, max_tokens=max_tokens, timeout=timeout)
-            try:
-                result = await asyncio.wait_for(load.run(args), remaining)
-            except TimeoutError:
-                status, reason, done = "aborted", "time_cap", True
-                break
-            result["experiment"] = {"id": experiment["id"], "kind": experiment["kind"], "repeat": repeat,
-                                    "arrival": label, "rate_per_s": rate or None,
-                                    "description": experiment.get("description", "")}
-            result["config_sha256"] = config_sha256
-            result["target"] = config["target"]
-            result["limitations"] = list(LIMITATIONS)
-            report = experiment_dir / f"{name}.json"
-            write_json(report, result)
-            artifacts.append(report.name)
-            reason = _abort_reason(result, abort_rate)
-            if reason:
-                status, done = "aborted", True
-                break
-        if done:
-            break
-    return {"artifacts": artifacts, "status": status, "abort_reason": reason,
-            "elapsed_s": round(time.monotonic() - started, 1), "cap_s": round(cap_s, 1)}
+    finally:
+        if collector:
+            overhead = await collector.stop()
+    outcome = {"artifacts": artifacts, "status": status, "abort_reason": reason,
+               "elapsed_s": round(time.monotonic() - started, 1), "cap_s": round(cap_s, 1)}
+    if overhead is not None:
+        outcome["telemetry_overhead"] = overhead
+    return outcome
+
+
+def _server_health(url):
+    """One synchronous /health read so the manifest records the worker's mode and precision at the start."""
+    import urllib.request
+    key = os.environ.get("TENSORPILOT_API_KEY")
+    request = urllib.request.Request(url.rstrip("/") + "/health", headers={"Authorization": "Bearer " + key} if key else {})
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return json.loads(response.read())
+    except Exception:
+        return None
 
 
 def run(config, *, url, output_dir, only=None, config_path=None, session_minutes=None):
@@ -297,13 +431,15 @@ def run(config, *, url, output_dir, only=None, config_path=None, session_minutes
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=False)
     digest = config_fingerprint(config)
+    server_at_start = _server_health(url)
     session_started = time.monotonic()
     manifest = {"schema": SCHEMA, "run_id": uuid.uuid4().hex,
                 "started_at_utc": datetime.now(timezone.utc).isoformat(),
                 "config_path": str(config_path) if config_path else None, "config_sha256": digest,
                 "target": config["target"], "session_budget_minutes": budget_min,
                 "assumptions_status": config["assumptions"]["status"],
-                "experiments": {}, "limitations": list(LIMITATIONS)}
+                "experiments": {}, "limitations": limitations_for(server_at_start),
+                "server_at_start": server_at_start}
     manifest_path = output / "manifest.json"
     for experiment in chosen:
         remaining = budget_min * 60 - (time.monotonic() - session_started)

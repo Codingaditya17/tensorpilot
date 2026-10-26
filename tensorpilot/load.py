@@ -58,9 +58,10 @@ def summarize(records, wall_s, slo=None):
     phase_profiles = [record["server"].get("phase_profile", {}) for record in completed]
     # Active window: first token produced to last token produced, across all completed requests. Unlike
     # wall time it excludes ramp-up (queue fill) and the drain tail, so it approximates steady throughput.
-    firsts = [r["dispatch_offset_s"] + r["client_ttft_s"] for r in completed if r.get("client_ttft_s") is not None]
+    firsts = [r["dispatch_offset_s"] + r["client_ttft_s"] for r in completed
+              if r.get("dispatch_offset_s") is not None and r.get("client_ttft_s") is not None]
     lasts = [r["dispatch_offset_s"] + r["client_last_token_s"] for r in completed
-             if r.get("client_last_token_s") is not None]
+             if r.get("dispatch_offset_s") is not None and r.get("client_last_token_s") is not None]
     window = (max(lasts) - min(firsts)) if firsts and lasts else None
     result = {
         "requests_total": len(records),
@@ -296,7 +297,9 @@ async def run(args):
                                               kind=getattr(args, "workload", "uniform"),
                                               seed=getattr(args, "seed", 42)))
     url = args.url.rstrip("/")
-    connector = aiohttp.TCPConnector(limit=args.concurrency)
+    # No keep-alive: the server force-closes a connection when a request hits its deadline, and a pooled
+    # connection reused right after would fail the next, unrelated request. Each request pays one loopback connect.
+    connector = aiohttp.TCPConnector(limit=args.concurrency, force_close=True)
     api_key = os.environ.get("TENSORPILOT_API_KEY")
     headers = {"Authorization": "Bearer " + api_key} if api_key else {}
     async with aiohttp.ClientSession(connector=connector, headers=headers) as session:
@@ -316,7 +319,7 @@ async def run(args):
                     "arrival_mode": (f"{getattr(args, 'arrival', 'uniform')} arrivals, concurrency-capped; inspect "
                                      "dispatch lag" if args.rate else "closed loop"),
                     "request_records": "compact; full records in journal" if getattr(args, "compact", False) else "full",
-                    "timings": "monotonic clock; client includes HTTP; server TTFT includes queue",
+                    "timings": "monotonic clock; client includes HTTP and a fresh connection per request; server TTFT includes queue",
                     "throughput": "successful output tokens / measured workload wall time, including drain",
                     "limitations": "client chunks include network buffering; MLX memory is not total system pressure; inspect artifact provenance; journals contain prompt text"}
         journal_path = getattr(args, "journal", None)
