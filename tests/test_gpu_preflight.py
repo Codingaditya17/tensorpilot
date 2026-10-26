@@ -153,5 +153,50 @@ def test_smoke_failure_reports_error_type_without_message(tmp_path):
     assert "secret" not in str(smoke)
 
 
+def test_traceback_file_is_private_redacted_and_keeps_the_report_message_free(tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "hf_supersecrettokenvalue123")
+    monkeypatch.setenv("TENSORPILOT_API_KEY", "worker-key-value-1234")
+
+    class Broken(FakeBackend):
+        def stream(self, prompt, max_tokens):
+            raise ValueError("bad shape; token hf_supersecrettokenvalue123 key worker-key-value-1234 "
+                             "header Bearer abcdef")
+            yield  # pragma: no cover
+
+    target = tmp_path / "preflight.traceback.txt"
+    smoke = by_name(preflight(load_backend=Broken, cache_dir=str(tmp_path), traceback_file=str(target)))["model_smoke"]
+    assert smoke["detail"] == "smoke inference failed: ValueError"
+    assert smoke["stage"] == "generate" and smoke["traceback_file"] == str(target)
+    assert "bad shape" not in str(smoke)
+    text = target.read_text()
+    assert "ValueError: bad shape" in text and "stream" in text and "during generate" in text
+    for leaked in ("hf_supersecrettokenvalue123", "worker-key-value-1234", "abcdef"):
+        assert leaked not in text
+    assert oct(target.stat().st_mode & 0o777) == "0o600"
+
+
+def test_traceback_reports_the_load_stage_and_survives_an_unwritable_path(tmp_path):
+    def broken_load():
+        raise ValueError("cannot load")
+
+    target = tmp_path / "t.txt"
+    smoke = by_name(preflight(load_backend=broken_load, cache_dir=str(tmp_path), traceback_file=str(target)))["model_smoke"]
+    assert smoke["stage"] == "load" and "during load" in target.read_text()
+    bad = by_name(preflight(load_backend=broken_load, cache_dir=str(tmp_path),
+                            traceback_file=str(tmp_path / "missing" / "t.txt")))["model_smoke"]
+    assert smoke["status"] == bad["status"] == "fail"
+    assert bad["traceback_file_error"] == "FileNotFoundError" and "traceback_file" not in bad
+
+
+def test_no_traceback_file_is_written_unless_requested(tmp_path):
+    class Broken(FakeBackend):
+        def stream(self, prompt, max_tokens):
+            raise ValueError("x")
+            yield  # pragma: no cover
+
+    preflight(load_backend=Broken, cache_dir=str(tmp_path))
+    assert list(tmp_path.glob("*traceback*")) == []
+
+
 def test_skipping_the_smoke_inference_cannot_make_the_gate_ready(tmp_path):
     assert preflight(cache_dir=str(tmp_path), skip_load=True)["ready"] is False

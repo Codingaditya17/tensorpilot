@@ -15,11 +15,13 @@ import argparse
 import asyncio
 import importlib.metadata
 import json
+import os
 import platform
 import re
 import shutil
 import sys
 import time
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -28,6 +30,27 @@ from .gpu_telemetry import sample_gpus
 
 SCHEMA = "tensorpilot.gpu-preflight/v2"
 REVISION = re.compile(r"[0-9a-f]{40}")
+SECRET_NAME = re.compile(r"KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL", re.IGNORECASE)
+SECRET_PATTERNS = (re.compile(r"hf_[A-Za-z0-9]{16,}"), re.compile(r"(?i)bearer\s+\S+"))
+MAX_TRACEBACK_CHARS = 8000
+
+
+def redact(text):
+    """Remove credential values from diagnostic text: env secrets, Hugging Face tokens, bearer headers."""
+    for name, value in os.environ.items():
+        if len(value) >= 8 and SECRET_NAME.search(name):
+            text = text.replace(value, "[REDACTED]")
+    for pattern in SECRET_PATTERNS:
+        text = pattern.sub("[REDACTED]", text)
+    return text
+
+
+def write_traceback(path, stage, text):
+    """Write a redacted traceback as a private file. The report itself never carries exception text."""
+    body = redact(f"smoke inference failed during {stage}\n{text}")[-MAX_TRACEBACK_CHARS:]
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w") as handle:
+        handle.write(body if body.endswith("\n") else body + "\n")
 GIB = 1024**3
 MIN_DRIVER = (525,)
 CUDA_12_8_DRIVER = (570, 26)
@@ -183,7 +206,7 @@ def fetch_hub_info(model, revision):
 async def run_preflight(*, model, revision, min_vram_gib, prompt, smoke_tokens, load_backend,
                         cache_dir=None, sampler=sample_gpus, torch_probe=probe_torch,
                         fetch_info=fetch_hub_info, skip_remote=False, skip_load=False,
-                        installed_pins=None, local_model=False):
+                        installed_pins=None, local_model=False, traceback_file=None):
     checks = []
     telemetry = await sampler()
     devices = telemetry.get("devices", [])
@@ -218,7 +241,7 @@ async def run_preflight(*, model, revision, min_vram_gib, prompt, smoke_tokens, 
     if skip_load:
         checks.append(check("model_smoke", False, "skipped by --skip-load; a smoke inference is required"))
     else:
-        smoke = await asyncio.to_thread(_smoke, load_backend, prompt, smoke_tokens)
+        smoke = await asyncio.to_thread(_smoke, load_backend, prompt, smoke_tokens, traceback_file)
         checks.append(check("model_smoke", smoke["ok"], smoke["detail"], **{
             key: value for key, value in smoke.items() if key not in ("ok", "detail")}))
     return {"schema": SCHEMA, "ready": all(item["status"] != "fail" for item in checks),
@@ -227,11 +250,13 @@ async def run_preflight(*, model, revision, min_vram_gib, prompt, smoke_tokens, 
             "min_vram_gib": min_vram_gib, "telemetry": telemetry, "torch": torch_info}
 
 
-def _smoke(load_backend, prompt, smoke_tokens):
+def _smoke(load_backend, prompt, smoke_tokens, traceback_file=None):
+    stage = "load"
     try:
         started = time.perf_counter()
         backend = load_backend()
         load_s = time.perf_counter() - started
+        stage = "generate"
         first_token_s = None
         tokens = []
         began = time.perf_counter()
@@ -241,10 +266,18 @@ def _smoke(load_backend, prompt, smoke_tokens):
             if token.output:
                 tokens.append(token.token_id)
         generation_s = time.perf_counter() - began
+        stage = "report"
         memory = backend.memory()
         provenance = backend.provenance
     except Exception as exc:  # Preflight reports the failure; it never hides it.
-        return {"ok": False, "detail": f"smoke inference failed: {type(exc).__name__}"}
+        result = {"ok": False, "detail": f"smoke inference failed: {type(exc).__name__}", "stage": stage}
+        if traceback_file:
+            try:
+                write_traceback(traceback_file, stage, traceback.format_exc())
+                result["traceback_file"] = str(traceback_file)
+            except OSError as error:
+                result["traceback_file_error"] = type(error).__name__
+        return result
     passed = bool(tokens)
     return {"ok": passed, "detail": f"generated {len(tokens)} output token(s)" if passed else
             "no output tokens were produced", "model_load_s": load_s, "first_token_s": first_token_s,
@@ -280,6 +313,7 @@ def main():
     parser.add_argument("--skip-load", action="store_true", help="run device checks without loading the model")
     parser.add_argument("--skip-remote", action="store_true", help="do not contact the Hugging Face Hub")
     parser.add_argument("--output", default="results/v09_gpu/preflight.json")
+    parser.add_argument("--traceback-file", help="write the redacted smoke-inference traceback here (mode 0600) on failure")
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
     if not 0 < args.min_vram_gib <= 1024 or not 1 <= args.smoke_tokens <= 128:
@@ -292,7 +326,7 @@ def main():
         model=args.model, revision=args.revision, min_vram_gib=args.min_vram_gib,
         prompt=args.prompt, smoke_tokens=args.smoke_tokens, load_backend=make_backend_loader(args),
         cache_dir=args.cache_dir, skip_remote=args.skip_remote, skip_load=args.skip_load,
-        local_model=local_model))
+        local_model=local_model, traceback_file=args.traceback_file))
     report.update({"generated_at_utc": datetime.now(timezone.utc).isoformat(),
                    "host": {"platform": platform.platform(), "machine": platform.machine(),
                             "python": platform.python_version()},

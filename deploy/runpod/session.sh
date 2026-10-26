@@ -135,7 +135,8 @@ bash "$REPO_ROOT/deploy/runpod/diagnostics.sh" "$RESULTS/diagnostics"
 
 echo "[2/7] preflight"
 python3 -m tensorpilot.gpu_preflight --model "$TENSORPILOT_MODEL" --revision "$TENSORPILOT_REVISION" \
-  --cache-dir "$CACHE_DIR" --output "$RESULTS/preflight.json"
+  --cache-dir "$CACHE_DIR" --output "$RESULTS/preflight.json" \
+  --traceback-file "$RESULTS/preflight.traceback.txt"
 
 echo "[3/7] worker on 127.0.0.1:$WORKER_PORT"
 TENSORPILOT_API_KEY="$TENSORPILOT_API_KEY" python3 -m tensorpilot.server --backend cuda \
