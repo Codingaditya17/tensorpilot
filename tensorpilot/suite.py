@@ -142,15 +142,15 @@ def rate_ladder(model, execution):
 STAGES = {
     "0.5b-serial": {"model": "0.5b", "engine": "tensorpilot", "execution": "serial", "quantization": "none",
                     "dtype": "float16", "max_prompt_tokens": 1024, "batch_size": 1, "queue_size": 64},
-    "0.5b-batch": {"model": "0.5b", "engine": "tensorpilot", "execution": "batch", "quantization": "none",
+    "0.5b-batch": {"invariance": True, "model": "0.5b", "engine": "tensorpilot", "execution": "batch", "quantization": "none",
                    "dtype": "float16", "max_prompt_tokens": 1024, "batch_size": 128, "queue_size": 256},
     "7b-bf16-serial": {"model": "7b", "engine": "tensorpilot", "execution": "serial", "quantization": "none",
                        "dtype": "bfloat16", "max_prompt_tokens": 1024, "batch_size": 1, "queue_size": 64},
-    "7b-bf16-batch": {"model": "7b", "engine": "tensorpilot", "execution": "batch", "quantization": "none",
+    "7b-bf16-batch": {"invariance": True, "model": "7b", "engine": "tensorpilot", "execution": "batch", "quantization": "none",
                       "dtype": "bfloat16", "max_prompt_tokens": 1024, "batch_size": 64, "queue_size": 192},
     "7b-bf16-long": {"model": "7b", "engine": "tensorpilot", "execution": "batch", "quantization": "none",
                      "dtype": "bfloat16", "max_prompt_tokens": 2048, "batch_size": 32, "queue_size": 64},
-    "14b-nf4-batch": {"model": "14b", "engine": "tensorpilot", "execution": "batch", "quantization": "nf4",
+    "14b-nf4-batch": {"invariance": True, "model": "14b", "engine": "tensorpilot", "execution": "batch", "quantization": "nf4",
                       "dtype": "bfloat16", "max_prompt_tokens": 1024, "batch_size": 64, "queue_size": 192},
     "14b-nf4-long": {"model": "14b", "engine": "tensorpilot", "execution": "batch", "quantization": "nf4",
                      "dtype": "bfloat16", "max_prompt_tokens": 2048, "batch_size": 16, "queue_size": 64},
@@ -176,6 +176,9 @@ EXTRA_STAGES = {
                   "expected_minutes": 12, "cap_minutes": 50, "rate": 5, "requests": 900, "kill_after": 25,
                   "what": "the same crash experiment with a 7B reload in the recovery path"},
 }
+# The batch-invariance check (tensorpilot.batch_invariance) runs before the benchmark in the batching stages.
+INVARIANCE_CAP_MINUTES = 10
+INVARIANCE_EXPECTED_MINUTES = 3
 READY_TIMEOUT_S = {"0.5b": 900, "7b": 1800, "14b": 3600}
 DOWNLOAD_GIB = {"0.5b": 0.92, "7b": 14.19, "14b": 27.51}
 SPECS = {"short": SHORT, "mixed": MIXED, "cancel": CANCEL, "timeouts": TIMEOUTS}
@@ -192,8 +195,10 @@ def stage_env(stage):
         env = {"V10_ENGINE": s["engine"], "V10_EXECUTION": s["execution"], "V10_QUANT": s["quantization"],
                "V10_DTYPE": s["dtype"], "V10_BATCH_SIZE": s["batch_size"], "V10_QUEUE_SIZE": s["queue_size"],
                "V10_MAX_PROMPT_TOKENS": s["max_prompt_tokens"], "V10_CONFIG": f"benchmarks/gpu/v10-{stage}.json",
-               "V10_CAP_MINUTES": config["max_session_minutes"] - 5,
-               "V10_EXPECTED_MINUTES": config["expected_experiment_minutes"]}
+               "V10_CAP_MINUTES": config["max_session_minutes"] - 5 + (INVARIANCE_CAP_MINUTES if s.get("invariance") else 0),
+               "V10_EXPECTED_MINUTES": round(config["expected_experiment_minutes"]
+                                             + (INVARIANCE_EXPECTED_MINUTES if s.get("invariance") else 0), 1),
+               "V10_INVARIANCE": 1 if s.get("invariance") else 0}
     elif stage in EXTRA_STAGES:
         s = EXTRA_STAGES[stage]
         env = {"V10_ENGINE": s["engine"], "V10_EXECUTION": "batch", "V10_QUANT": s["quantization"],

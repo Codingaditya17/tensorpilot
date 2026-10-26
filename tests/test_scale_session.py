@@ -87,7 +87,7 @@ def test_plan_prints_the_cap_and_needs_no_secret(tmp_path):
     result = run(["--plan", "14b-nf4-batch"], tmp_path)
     assert result.returncode == 0
     assert "Qwen/Qwen2.5-14B-Instruct @ cf98f3b3bbb457ad9e2bb7baf9a0125b6b88caa8" in result.stdout
-    assert "quantization nf4" in result.stdout and "HARD CAP:        204 minutes" in result.stdout
+    assert "quantization nf4" in result.stdout and "HARD CAP:        214 minutes" in result.stdout
     assert KEY not in result.stdout and not (tmp_path / "session" / "ledger.jsonl").exists()
 
 
@@ -159,6 +159,25 @@ def test_a_stage_runs_end_to_end_and_leaves_checksummed_evidence_and_a_ledger_en
     assert entry["elapsed_min"] > 0 and entry["cap_min"] == 21
     assert "THE POD IS STILL BILLING" in result.stderr and "TEST MODE" in result.stderr
     assert not stub_alive(), "the engine process must be stopped when the stage ends"
+
+
+def test_a_batching_stage_measures_batch_invariance_before_the_benchmark(tmp_path):
+    result, _ = stage_with_stub(tmp_path, stage="0.5b-batch", SESSION_BUDGET_MINUTES="500")
+    assert result.returncode == 0, result.stderr[-1500:]
+    (directory,) = stage_dirs(tmp_path)
+    report = json.loads((directory / "invariance.json").read_text())
+    assert report["schema"] == "tensorpilot.batch-invariance/v1" and report["prompts"] == 32
+    assert report["together_vs_solo"]["exact_matches"] == 32, "the deterministic stub must be batch-invariant"
+    assert "batch-invariance" in result.stderr
+    (entry,) = ledger(tmp_path)
+    assert entry["cap_min"] == 124, "the invariance check's ten minutes are inside the stage's hard cap"
+
+
+def test_serial_and_vllm_stages_do_not_run_the_invariance_check(tmp_path):
+    result, _ = stage_with_stub(tmp_path)
+    assert result.returncode == 0
+    (directory,) = stage_dirs(tmp_path)
+    assert not (directory / "invariance.json").exists()
 
 
 def test_the_ledger_accumulates_and_prices_the_session_when_a_price_is_given(tmp_path):

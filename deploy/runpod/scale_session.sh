@@ -263,6 +263,11 @@ stage_benchmark() {  # engine
   if [[ "$engine" == "vllm" ]]; then probe="$url/v1/models"; key="$TENSORPILOT_API_KEY"; fi
   wait_ready "$probe" "$ENGINE_PID" "$V10_READY_TIMEOUT_S" "$key" || { tail -20 "$STAGE_DIR/engine.log" >&2; return 1; }
   run_smoke "$engine" "$url" || return 1
+  if [[ "${V10_INVARIANCE:-0}" == "1" && "$engine" == "tensorpilot" ]]; then
+    log "batch-invariance: does a request's output depend on what else is in the batch?"
+    timeout --signal=TERM --kill-after=30 10m python3 -m tensorpilot.batch_invariance --url "$url" --prompts 32 \
+      --output "$STAGE_DIR/invariance.json" || log "the invariance check did not complete; the benchmark continues"
+  fi
   # The runner stops starting experiments one minute before the hard kill, so a normal overrun ends cleanly.
   local soft
   soft="$(python3 -c "cap = float('$V10_CAP_MINUTES'); print(cap - 1 if cap > 2 else cap)")"

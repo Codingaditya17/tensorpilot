@@ -156,6 +156,8 @@ async def request_one(session, url, index, args, scheduled, experiment_start, it
     timeout_s = item.get("timeout_s", args.timeout)
     cancel_tokens, cancel_s = item.get("cancel_after_tokens"), item.get("cancel_after_s")
     scope = None
+    if getattr(args, "capture_tokens", False):
+        record["token_ids"] = []  # for batch-invariance checks; omitted otherwise to keep journals small
     try:
         # Client-side cancellation timer: it can fire while the request is queued or while it decodes.
         async with asyncio.timeout(cancel_s) as scope:
@@ -182,6 +184,8 @@ async def request_one(session, url, index, args, scheduled, experiment_start, it
                                 record["client_ttft_s"] = elapsed
                             record["client_token_times_s"].append(elapsed)
                             record["received_output_tokens"] += 1
+                            if "token_ids" in record:
+                                record["token_ids"].append(event["token_id"])
                             if cancel_tokens and record["received_output_tokens"] >= cancel_tokens:
                                 record["cancelled"] = True  # leaving the stream closes the connection
                                 break

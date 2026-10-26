@@ -1,0 +1,88 @@
+{
+  "schema": "tensorpilot.baseline/v1",
+  "label": "v0.9.1-4 on one RTX 4090, serial CUDA worker",
+  "image": "ghcr.io/codingaditya17/tensorpilot/cuda-experiment:v0.9.1-4",
+  "image_digest": "sha256:fe252b3e44d04cdef5fa444963b30b7454a0a777a25942401a5f5b2da6274f6d",
+  "evidence_archive": "evidence.tar.gz",
+  "evidence_sha256": "3424f781ff38eea57bbfb11f448399b61f9cc5c08f7ad8befb171aa04cc30bd3",
+  "hardware": {
+    "gpu": "NVIDIA GeForce RTX 4090",
+    "compute_capability": "8.9",
+    "driver": "595.91.07"
+  },
+  "software": {
+    "torch": "2.9.1",
+    "transformers": "5.20.1",
+    "tokenizers": "0.23.3",
+    "aiohttp": "3.14.5"
+  },
+  "model": {
+    "repo": "Qwen/Qwen2.5-0.5B-Instruct",
+    "revision": "7ae557604adf67be50417f59c2c2f167def9a775",
+    "weights_gib": 0.92
+  },
+  "preflight": {
+    "ready": true,
+    "model_load_s": 4.67,
+    "first_token_s": 0.391,
+    "cuda_peak_reserved_bytes": 1063256064
+  },
+  "gateway_smoke": {
+    "successful": 5,
+    "failed": 0
+  },
+  "experiments": {
+    "first-open-rate": {
+      "requests": 8,
+      "concurrency": 4,
+      "rate": 0.5,
+      "max_tokens": 32,
+      "successful": 8,
+      "failed": 0,
+      "output_tokens_per_s_wall": 17.59,
+      "p50_latency_s": 0.5617,
+      "p95_latency_s": 0.6275,
+      "p95_ttft_s": 0.0227,
+      "p95_inter_token_s": 0.0206,
+      "max_queue_wait_s": 0.000297
+    },
+    "first-length-medium": {
+      "requests": 4,
+      "concurrency": 1,
+      "rate": null,
+      "max_tokens": 128,
+      "successful": 4,
+      "failed": 0,
+      "output_tokens_per_s_wall": 59.07,
+      "p50_latency_s": 2.1674,
+      "p95_latency_s": 2.1716,
+      "p95_ttft_s": 0.0202,
+      "p95_inter_token_s": 0.0184,
+      "max_queue_wait_s": 0.000168
+    },
+    "first-closed-c1": {
+      "requests": 8,
+      "concurrency": 1,
+      "rate": null,
+      "max_tokens": 32,
+      "successful": 8,
+      "failed": 0,
+      "output_tokens_per_s_wall": 57.51,
+      "p50_latency_s": 0.5609,
+      "p95_latency_s": 0.5674,
+      "p95_ttft_s": 0.0207,
+      "p95_inter_token_s": 0.0185,
+      "max_queue_wait_s": 0.000137
+    }
+  },
+  "not_covered": [
+    "concurrency above one actually overlapping",
+    "overload and rejection",
+    "cancellation and crash recovery",
+    "continuous GPU sampling",
+    "greedy-vs-reference correctness on the GPU",
+    "any model above 0.5B",
+    "batching"
+  ],
+  "status": "IMMUTABLE baseline. Do not overwrite; compare new runs against it."
+}
