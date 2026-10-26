@@ -15,7 +15,7 @@
 # install_vllm.sh), TENSORPILOT_POD_MAX_MINUTES (330 or more) and TENSORPILOT_RESULTS_ROOT. Nothing else is read.
 set -Eeuo pipefail
 
-EXPECTED_DIGEST="sha256:145879a6fac04f1a673fc18885aec082942c15245e497fe7ec82e4bf953488cc"
+EXPECTED_DIGEST="sha256:7e65d7ca7cdd4fa7f636a74092550b9353ffa5923796b6a993f625858c446e56"
 STAGE="startup"
 trap 'echo >&2; echo "*** STOPPED at: ${STAGE}. Evidence for every stage that ran, including this one, is archived under ${SESSION:-the session directory}." >&2; echo "*** THE POD IS STILL BILLING: copy the evidence, then TERMINATE the Pod." >&2' ERR
 

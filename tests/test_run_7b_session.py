@@ -11,7 +11,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "deploy" / "runpod" / "run_7b_session.sh"
-DIGEST = "sha256:145879a6fac04f1a673fc18885aec082942c15245e497fe7ec82e4bf953488cc"
+DIGEST = "sha256:7e65d7ca7cdd4fa7f636a74092550b9353ffa5923796b6a993f625858c446e56"
 STAGES = ["probe-7b", "7b-bf16-prod-serial", "7b-bf16-prod", "faults-7b", "vllm-7b-bf16-prod", "quality-7b"]
 
 FAKE_SCALE = r'''#!/usr/bin/env bash
@@ -166,7 +166,7 @@ def test_the_script_needs_no_variables_beyond_the_documented_ones(pod):
         assert name in header, f"{name} is read by the script but not documented in its header"
 
 
-def test_the_pinned_digest_is_the_published_rc2_2_digest_and_the_session_budget_is_the_planned_one():
+def test_the_pinned_digest_is_the_published_rc2_3_digest_and_the_session_budget_is_the_planned_one():
     from tensorpilot import suite
     assert DIGEST in SCRIPT.read_text()
     plan = suite.budget_plan(0.91, 8.57, {"7b": suite.SESSIONS["7b"]})["sessions"]["7b"]
