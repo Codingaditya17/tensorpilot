@@ -133,20 +133,20 @@ experiment, which must reject. Timeouts (120 s) and the SLO attainment make satu
 
 ## 6. Budget, sessions and decision gates
 
-`python -m tensorpilot.suite --budget [--price-per-hour P] [--budget-usd 9]`. The price is an **assumption** ($0.90/h, from the earlier plan; the repository records no price). Enter your Pod's real
-price and the plan recomputes, scaling budgets down together and reporting any stage the ledger would then refuse.
+`python -m tensorpilot.suite --budget [--price-per-hour P] [--budget-usd B]`. The price is a figure you confirm when renting (**$0.91/h including storage** for the 7B session below; earlier plans used $0.90 and $0.89).
+The **ledger counts each stage's whole wall time**: preflight (which loads the model once), the worker's own load, the smoke test, the memory gate and the export all count, and so does the model download in a session's
+first stage. The model assumes per-stage start-up minutes (TensorPilot 6, vLLM 7, quality 2, faults 3, probe 2) and a 30 MB/s download. **Those are assumptions**; the first 7B run replaces them with measurements.
+`SESSION_BUDGET_MINUTES` is the largest, over the stages, of 1.15 × (expected ledger time used before the stage) + its cap, because the runner refuses a stage if used time plus its cap would exceed the budget.
 
-| Session | Stages (in order) | Expected stage min | `SESSION_BUDGET_MINUTES` | Overhead + slack assumed | Expected | Worst case |
+| Session | Stages (in order) | Expected ledger min | `SESSION_BUDGET_MINUTES` | Outside the ledger (boot, vLLM install, idle) + slack | Expected | Worst case at $0.91/h |
 |---|---|---|---|---|---|---|
-| **gate** | `0.5b-quick-batch`, `0.5b-quick-batch-packed`, `probe-0.5b` | 17.8 | 36 | 25 + 15 | $0.64 | $1.14 |
-| **7b** | `probe-0.5b` (unpacked), `probe-7b`, `7b-bf16-prod-serial`, `7b-bf16-prod`, `faults-7b`, `quality-7b`, `vllm-7b-bf16-prod` | 158.7 | 222 | 75 + 15 | $3.51 | $4.68 |
-| **14b** | `14b-nf4-prod`, `quality-14b` | 54.3 | 105 | 83 + 15 | $2.06 | $3.05 |
-| **Core total** | | | | | **$6.21** | **$8.87** |
-| optional `14b-vllm` | `vllm-14b-nf4-prod` | 39.3 | | 55 + 15 | | +$2.48 (outside the $9) |
+| gate (done) | `0.5b-quick-batch`, `0.5b-quick-batch-packed`, `probe-0.5b` | | 36 | | | |
+| **7b** | `probe-7b`, `7b-bf16-prod-serial`, `7b-bf16-prod`, `faults-7b`, `vllm-7b-bf16-prod`, `quality-7b` | 192.8 | **250** | 40 + 15 | **$3.53** | **$4.63** |
+| **14b** (conditional) | `14b-nf4-prod`, `quality-14b` | 78.0 | 105 | 25 + 15 | $1.56 | $2.20 |
 
-Worst case = the session's ledger budget (the ledger refuses any stage whose cap would take used time past it, so stage time cannot exceed it) + the assumed overhead (boot, downloads, model loads,
-vLLM install, export) + slack. **Overhead and idle time are not enforced by the ledger**: they are the part of the bound that rests on assumption and on you terminating the Pod. The 14B vLLM
-comparison is optional because it needs a fresh Pod, a 28 GB download and a vLLM install; run it only if credits remain.
+An earlier version of this plan used 225 minutes for the 7B session. With the ledger counting start-up and the download, about 117 minutes are used before the vLLM stage, so 117 + its 115-minute cap exceeds 225 and the ledger
+would refuse it; 250 passes with a 15% margin. Both sessions together cost at most $6.83 in the worst case; with the $0.43 already spent that stays under the $9.00 cap. Worst case = the ledger budget + the outside-the-ledger
+overhead + slack: the ledger bounds stage time, and **boot, the vLLM install and idle time are the part that depends on you terminating the Pod**. The optional `14b-vllm` session is not in these totals.
 
 Production caps are 1.5× each experiment's estimate (older stages use 2.5×). The throughput assumptions (40 tok/s single stream for 7B, 25 for 14B, batching exponent 0.8) are **unmeasured**.
 If they are too optimistic, experiments stop at their caps and the acceptance items say INCONCLUSIVE ("cut short by its time cap") instead of the budget being exceeded.
@@ -215,16 +215,113 @@ python -m tensorpilot.packing_gate "$UNPACKED" "$PACKED" --output "$TENSORPILOT_
 python3 -c "import glob,json; print(json.load(open(glob.glob('$TENSORPILOT_V10_SESSION/probe-0.5b-2*/divergence-probe.json')[0]))['meaning'])"
 ```
 
-**D. 7B session** (`SESSION_BUDGET_MINUTES=222`; add `PREFILL_PACK_TOKENS=0` only if gate 1 failed):
+**D. 7B session, one gated script** (`deploy/runpod/run_7b_session.sh`, also on the Pod under `/opt/tensorpilot/deploy/runpod/` once the image contains it; until then paste it). Export the variables its header lists, then run it with `pipefail` so a failure survives `tee`:
 
 ```bash
-scale_session.sh probe-7b
-scale_session.sh 7b-bf16-prod-serial
-scale_session.sh 7b-bf16-prod
-scale_session.sh faults-7b
-scale_session.sh quality-7b
-deploy/runpod/install_vllm.sh --plan && deploy/runpod/install_vllm.sh
-scale_session.sh vllm-7b-bf16-prod
+set -o pipefail
+bash ~/run7b.sh 2>&1 | tee ~/run7b.log ; echo "exit status: ${PIPESTATUS[0]}"
+```
+
+The script (a test asserts this copy equals the file):
+
+```bash
+#!/usr/bin/env bash
+# Run the whole 7B BF16 production session as one gated chain, on the Pod, as user tensorpilot, inside tmux.
+#
+#   set -o pipefail
+#   bash run_7b_session.sh 2>&1 | tee ~/run7b.log ; echo "exit status: ${PIPESTATUS[0]}"
+#
+# Order: probe-7b (mandatory correctness gate) -> 7b-bf16-prod-serial -> 7b-bf16-prod -> faults-7b -> vLLM install -> vllm-7b-bf16-prod
+# -> quality-7b -> (optional) the unpacked 0.5B divergence probe, only if the ledger budget still allows it.
+#
+# It stops at the first failure of anything: a stage, the probe gate, the vLLM installation or a check below. Every stage archives its own
+# evidence whether it passes or fails, so a stop loses nothing. THE POD KEEPS BILLING until you terminate it.
+#
+# Environment it needs. You export: TENSORPILOT_API_KEY, TENSORPILOT_IMAGE_REF, RUNPOD_POD_ID, SESSION_BUDGET_MINUTES (250 to 260),
+# PREFILL_PACK_TOKENS (512); PRICE_PER_HOUR_USD is optional (cost lines). The login profile gives it: PATH (scale_session.sh,
+# install_vllm.sh), TENSORPILOT_POD_MAX_MINUTES (330 or more) and TENSORPILOT_RESULTS_ROOT. Nothing else is read.
+set -Eeuo pipefail
+
+EXPECTED_DIGEST="sha256:145879a6fac04f1a673fc18885aec082942c15245e497fe7ec82e4bf953488cc"
+STAGE="startup"
+trap 'echo >&2; echo "*** STOPPED at: ${STAGE}. Evidence for every stage that ran, including this one, is archived under ${SESSION:-the session directory}." >&2; echo "*** THE POD IS STILL BILLING: copy the evidence, then TERMINATE the Pod." >&2' ERR
+
+# ----- checks the stage runner does not make (it checks the GPU, disk, lifetime and budget per stage, and the vLLM driver only
+# ----- when the vLLM stage starts, about two hours in; this fails early instead) -----
+fail() { echo "refused: $*" >&2; exit 2; }
+[[ -z "${V10_TEST_MODE:-}" ]] || fail "V10_TEST_MODE is set; that mode skips GPU checks and its results are not evidence"
+for name in TENSORPILOT_API_KEY RUNPOD_POD_ID; do [[ -n "${!name:-}" ]] || fail "$name is not exported"; done
+[[ "${TENSORPILOT_IMAGE_REF:-}" == *"@${EXPECTED_DIGEST}" ]] || fail "TENSORPILOT_IMAGE_REF must end in @${EXPECTED_DIGEST}"
+[[ "${PREFILL_PACK_TOKENS:-}" == 512 ]] || fail "PREFILL_PACK_TOKENS must be 512 for this session"
+budget="${SESSION_BUDGET_MINUTES:-}"; pod_max="${TENSORPILOT_POD_MAX_MINUTES:-}"
+[[ "$budget" =~ ^[0-9]+$ ]] && (( budget >= 250 && budget <= 260 )) ||
+  fail "SESSION_BUDGET_MINUTES must be 250 to 260 (225 would have the ledger refuse the vLLM stage; more than 260 spends past the plan)"
+[[ "$pod_max" =~ ^[0-9]+$ ]] && (( pod_max >= 330 )) ||
+  fail "TENSORPILOT_POD_MAX_MINUTES must be at least 330 in the Pod's environment variables"
+command -v scale_session.sh >/dev/null || fail "scale_session.sh is not on PATH (log in again so the profile is read)"
+command -v install_vllm.sh >/dev/null || fail "install_vllm.sh is not on PATH (log in again so the profile is read)"
+driver="$(nvidia-smi --query-gpu=name,driver_version --format=csv,noheader | head -1)"
+echo "GPU: ${driver}"
+major="${driver##*, }"; major="${major%%.*}"
+[[ "$major" =~ ^[0-9]+$ ]] && (( major >= 580 )) || fail "the driver must be 580 or newer for vLLM (this host: ${driver})"
+
+export SESSION_BUDGET_MINUTES PREFILL_PACK_TOKENS TENSORPILOT_API_KEY
+SESSION="${TENSORPILOT_V10_SESSION:-${TENSORPILOT_RESULTS_ROOT:-/workspace/results}/v10-session}"
+export TENSORPILOT_V10_SESSION="$SESSION"
+
+run() { STAGE="$1"; echo; echo "=== $(date -u +%H:%M:%S) stage $1"; scale_session.sh "$1"; }
+
+ledger_used() {
+  python3 - "$SESSION/ledger.jsonl" <<'PY'
+import json, sys
+print(round(sum(json.loads(l)["elapsed_min"] for l in open(sys.argv[1]) if l.strip()), 1))
+PY
+}
+
+# ----- 1. the mandatory correctness gate -----
+run probe-7b
+STAGE="probe-7b gate"
+python3 - "$SESSION" <<'PY'
+import glob, json, sys
+r = json.load(open(sorted(glob.glob(sys.argv[1] + "/probe-7b-2*/divergence-probe.json"))[-1]))
+s = r["settings"]
+ok = (r["passed"] and r["unexplained"] == 0 and r["prompts"] == 32 and s["granted_capacity"] == s["capacity"] == 32
+      and s["prefill_pack_tokens"] == 512)
+print(f"probe-7b: {r['exact_matches']}/32 identical, {r['near_tie']} near-tie, {r['unexplained']} unexplained, "
+      f"{s['granted_capacity']}/{s['capacity']} slots, packing {s['prefill_pack_tokens']}: GATE {'PASS' if ok else 'FAIL'}")
+sys.exit(0 if ok else 1)
+PY
+
+# ----- 2-4. serial baseline; continuous batching (its memory gate must grant all 48 slots); crash recovery -----
+run 7b-bf16-prod-serial
+run 7b-bf16-prod
+run faults-7b
+
+# ----- 5. vLLM: installed into its own virtualenv (the 7B weights are already in the shared cache, so nothing is downloaded twice) -----
+STAGE="vLLM plan"
+install_vllm.sh --plan
+STAGE="vLLM installation"
+install_vllm.sh
+run vllm-7b-bf16-prod
+
+# ----- 6. quality -----
+run quality-7b
+
+# ----- 7. optional: the unpacked 0.5B probe that explains the gate-session divergence (about 2 minutes), only if the ledger allows -----
+used="$(ledger_used)"
+if python3 -c "import sys; sys.exit(0 if float(sys.argv[1]) + 12 <= float(sys.argv[2]) else 1)" "$used" "$SESSION_BUDGET_MINUTES"; then
+  STAGE="probe-0.5b (optional)"
+  echo; echo "=== optional unpacked 0.5B probe (ledger ${used} of ${SESSION_BUDGET_MINUTES} minutes used)"
+  PREFILL_PACK_TOKENS=0 scale_session.sh probe-0.5b
+else
+  echo; echo "optional unpacked 0.5B probe skipped: ${used} of ${SESSION_BUDGET_MINUTES} ledger minutes used, its 12-minute cap would not fit"
+fi
+
+STAGE="finished"
+echo; echo "=== ALL STAGES DONE ($(date -u +%H:%M:%S))"
+cat "$SESSION/ledger.jsonl"
+ls -lh "$SESSION"/*.tar.gz
+echo "*** COPY THE EVIDENCE TO YOUR MAC, THEN TERMINATE THE POD (terminating, not stopping, ends billing)."
 ```
 
 **E. 14B session** (fresh Pod, `SESSION_BUDGET_MINUTES=105`): `scale_session.sh 14b-nf4-prod` then `scale_session.sh quality-14b`. Optional, if credits remain (its own Pod, budget ~60):

@@ -236,20 +236,25 @@ SPECS = {"short": SHORT, "mixed": MIXED, "cancel": CANCEL, "timeouts": TIMEOUTS}
 BUDGET_USD = 9.0
 ASSUMED_PRICE_PER_HOUR = 0.90
 SLACK_MINUTES = 15
+# A stage's ledger entry is its WHOLE wall time, not just its experiments: preflight (which loads the model once), the worker's own
+# load, the smoke test, the memory gate and the evidence export all count, and so does the model download in a session's first stage.
+# These per-stage start-up figures and the download rate are ASSUMPTIONS (7B loads from a warm cache in roughly two minutes each).
+STAGE_STARTUP_MINUTES = {"tensorpilot": 6, "vllm": 7, "quality": 2, "faults": 3, "probe": 2}
+DOWNLOAD_MB_PER_S = 30
+PATH_MARGIN = 1.15   # time used before a stage may run 15% over its expected total before the ledger would refuse the next stage
 SESSIONS = {
-    "gate": {"stages": ["0.5b-quick-batch", "0.5b-quick-batch-packed", "probe-0.5b"], "overhead_minutes": 25,
+    "gate": {"stages": ["0.5b-quick-batch", "0.5b-quick-batch-packed", "probe-0.5b"], "overhead_minutes": 15,
              "purpose": "does packed prefill help or hurt, and is every solo-vs-batched divergence a rounding-level near-tie?"},
     # probe-0.5b runs first with PREFILL_PACK_TOKENS=0: the unpacked HTTP path is deterministic and equals the probe's insert-all-then-step
     # order, so it reproduces (and explains with logits) the quick-session divergence that the packed gate-session probe did not.
-    "7b": {"stages": ["probe-0.5b", "probe-7b", "7b-bf16-prod-serial", "7b-bf16-prod", "faults-7b", "quality-7b",
-                      "vllm-7b-bf16-prod"],
-           "overhead_minutes": 78, "purpose": "7B bf16: serial baseline, scale sweep, reliability, crash recovery, vLLM"},
-    "14b": {"stages": ["14b-nf4-prod", "quality-14b"], "overhead_minutes": 83,
+    "7b": {"stages": ["probe-7b", "7b-bf16-prod-serial", "7b-bf16-prod", "faults-7b", "vllm-7b-bf16-prod", "quality-7b"],
+           "overhead_minutes": 40, "purpose": "7B bf16: serial baseline, scale sweep, reliability, crash recovery, vLLM"},
+    "14b": {"stages": ["14b-nf4-prod", "quality-14b"], "overhead_minutes": 25,
             "purpose": "14B NF4: load, generate, scale sweep, fidelity"},
 }
 # Not counted against the $9: only if credits remain after the core sessions. A fresh Pod re-downloads 28 GB and reinstalls vLLM.
 OPTIONAL_SESSIONS = {
-    "14b-vllm": {"stages": ["vllm-14b-nf4-prod"], "overhead_minutes": 55,
+    "14b-vllm": {"stages": ["vllm-14b-nf4-prod"], "overhead_minutes": 20,
                  "purpose": "vLLM on the same 14B NF4 workloads (a different Pod from the TensorPilot 14B run)"},
 }
 
@@ -259,12 +264,23 @@ def _stage_minutes(stage):
     return env["V10_EXPECTED_MINUTES"], env["V10_CAP_MINUTES"]
 
 
+def _ledger_minutes(stage, first_in_session):
+    """Expected ledger time for a stage: its experiments plus assumed start-up, plus the download if it is the first stage."""
+    env = stage_env(stage)
+    minutes = env["V10_EXPECTED_MINUTES"] + STAGE_STARTUP_MINUTES[env["V10_ENGINE"] if env["V10_ENGINE"] in STAGE_STARTUP_MINUTES
+                                                                   else "tensorpilot"]
+    if first_in_session:
+        minutes += DOWNLOAD_GIB[env["V10_MODEL_KEY"]] * 1024 / DOWNLOAD_MB_PER_S / 60
+    return minutes
+
+
 def budget_plan(price_per_hour=ASSUMED_PRICE_PER_HOUR, budget_usd=BUDGET_USD, sessions=None):
     """Expected and worst-case cost per session, the SESSION_BUDGET_MINUTES that enforces it, and whether it fits.
 
-    Worst case for a session = its stage-time budget + assumed overhead + slack, because the ledger refuses any stage that
-    would take the used time past the budget. The budgets are the expected stage time plus headroom for ONE stage running to
-    its cap, scaled down together if the sum of worst cases would exceed the money.
+    Worst case for a session = its ledger budget + the assumed overhead outside the ledger (boot, vLLM install, idle) + slack. The
+    ledger counts each stage's whole wall time, and refuses a stage whose cap would take the used time past the budget. The wanted
+    budget is therefore the largest, over the stages, of (expected time used before it, with a 15% margin) + its cap; budgets are
+    scaled down together if the sum of worst cases would exceed the money.
     """
     sessions = SESSIONS if sessions is None else sessions
     per_minute = price_per_hour / 60
@@ -274,10 +290,11 @@ def budget_plan(price_per_hour=ASSUMED_PRICE_PER_HOUR, budget_usd=BUDGET_USD, se
         mins = [_stage_minutes(stage) for stage in session["stages"]]
         expected = sum(m[0] for m in mins)
         caps = [m[1] for m in mins]
+        ledger = [_ledger_minutes(stage, i == 0) for i, stage in enumerate(session["stages"])]
         rows[name] = {"stages": list(session["stages"]), "expected_stage_minutes": round(expected, 1),
                       "stage_caps": caps, "overhead_minutes": session["overhead_minutes"], "slack_minutes": SLACK_MINUTES,
-                      "wanted_budget_minutes": math.ceil(max(sum(m[0] for m in mins[:i]) + caps[i]
-                                                             for i in range(len(caps)))),
+                      "expected_ledger_minutes": round(sum(ledger), 1),
+                      "wanted_budget_minutes": math.ceil(max(PATH_MARGIN * sum(ledger[:i]) + caps[i] for i in range(len(caps)))),
                       "purpose": session["purpose"]}
     wanted_worst = sum(r["wanted_budget_minutes"] + r["overhead_minutes"] + r["slack_minutes"] for r in rows.values())
     # Scale the stage-time budgets so that the sum of worst cases is the money, if the wanted budgets would overspend.
@@ -288,13 +305,14 @@ def budget_plan(price_per_hour=ASSUMED_PRICE_PER_HOUR, budget_usd=BUDGET_USD, se
     for r in rows.values():
         r["session_budget_minutes"] = math.floor(r["wanted_budget_minutes"] * scale)
         used, refused = 0.0, None
-        for stage, cap, minutes in zip(r["stages"], r["stage_caps"], (_stage_minutes(x)[0] for x in r["stages"])):
-            if used + cap > r["session_budget_minutes"]:
+        for i, (stage, cap) in enumerate(zip(r["stages"], r["stage_caps"])):
+            minutes = _ledger_minutes(stage, i == 0)
+            if PATH_MARGIN * used + cap > r["session_budget_minutes"]:
                 refused = stage
                 break
             used += minutes
         r["ledger_refuses_on_the_expected_path"] = refused
-        r["expected_total_minutes"] = round(r["expected_stage_minutes"] + r["overhead_minutes"], 1)
+        r["expected_total_minutes"] = round(r["expected_ledger_minutes"] + r["overhead_minutes"], 1)
         r["worst_total_minutes"] = r["session_budget_minutes"] + r["overhead_minutes"] + r["slack_minutes"]
         r["expected_cost_usd"] = round(r["expected_total_minutes"] * per_minute, 2)
         r["worst_cost_usd"] = round(r["worst_total_minutes"] * per_minute, 2)
