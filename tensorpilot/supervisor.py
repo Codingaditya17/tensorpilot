@@ -76,6 +76,18 @@ async def supervise(command, health_url, lifecycle_path, worker_log_path, *, max
                 await stop_process(process)
 
 
+def build_command(args):
+    """The worker command line for the supervised server, including any flags forwarded with --worker-arg."""
+    command = [sys.executable, "-m", "tensorpilot.server", "--host", args.host,
+               "--port", str(args.port), "--execution", args.execution,
+               "--batch-size", str(args.batch_size), "--queue-size", str(args.queue_size),
+               "--memory-gib", str(args.memory_gib),
+               "--max-output-tokens", str(args.max_output_tokens)]
+    if args.offline:
+        command.append("--offline")
+    return command + list(args.worker_arg)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", default="http://127.0.0.1:8080")
@@ -92,18 +104,15 @@ def main():
     parser.add_argument("--memory-gib", type=float, default=6)
     parser.add_argument("--max-output-tokens", type=int, default=512)
     parser.add_argument("--offline", action="store_true")
+    parser.add_argument("--worker-arg", action="append", default=[],
+                        help="a flag or value forwarded to the worker, repeatable; for example "
+                             "--worker-arg=--quantization --worker-arg=nf4")
     args = parser.parse_args()
     if not 0 <= args.max_restarts <= 20 or args.ready_timeout <= 0 or not 0 <= args.backoff <= 60:
         parser.error("restarts must be 0..20, timeout positive, and backoff 0..60 seconds")
     if not 1 <= args.port <= 65535 or not 1 <= args.max_output_tokens <= 512:
         parser.error("port must be valid and max-output-tokens must be in 1..512")
-    command = [sys.executable, "-m", "tensorpilot.server", "--host", args.host,
-               "--port", str(args.port), "--execution", args.execution,
-               "--batch-size", str(args.batch_size), "--queue-size", str(args.queue_size),
-               "--memory-gib", str(args.memory_gib),
-               "--max-output-tokens", str(args.max_output_tokens)]
-    if args.offline:
-        command.append("--offline")
+    command = build_command(args)
     try:
         code = asyncio.run(supervise(command, args.url, args.lifecycle_log, args.worker_log,
                                      max_restarts=args.max_restarts, ready_timeout=args.ready_timeout,

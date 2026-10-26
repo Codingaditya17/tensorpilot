@@ -429,6 +429,7 @@ async def run(args):
         duration = getattr(args, "duration_s", None)
         limit = args.requests if duration is None else getattr(args, "max_requests", 10000)
         metadata = {"run_id": uuid.uuid4().hex, "run_at_utc": datetime.now(timezone.utc).isoformat(),
+                    "run_started_perf_s": None,  # set below, on this process's perf_counter clock
                     "client_source_sha256": source_fingerprint(),
                     "client_platform": platform.platform(), "client_python": platform.python_version(),
                     "server": server, "config": vars(args),
@@ -448,6 +449,7 @@ async def run(args):
         records = []
         offsets = arrival_offsets(args, limit)
         start = time.perf_counter()
+        metadata["run_started_perf_s"] = start
         stop_at = start + duration if duration is not None else math.inf
 
         async def worker():

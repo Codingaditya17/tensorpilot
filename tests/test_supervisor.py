@@ -55,3 +55,19 @@ def test_supervisor_stops_after_restart_budget(tmp_path):
         assert result == 1
         assert "restart_budget_exhausted" in lifecycle.read_text()
     asyncio.run(scenario())
+
+
+def test_worker_flags_are_forwarded_after_the_fixed_arguments():
+    import sys
+    from types import SimpleNamespace
+    from tensorpilot.supervisor import build_command
+    args = SimpleNamespace(host="127.0.0.1", port=8180, execution="batch", batch_size=32, queue_size=64,
+                           memory_gib=6, max_output_tokens=512, offline=False,
+                           worker_arg=["--quantization", "nf4", "--kv-budget-gib", "6"])
+    command = build_command(args)
+    assert command[:3] == [sys.executable, "-m", "tensorpilot.server"]
+    assert command[command.index("--execution") + 1] == "batch" and command[command.index("--batch-size") + 1] == "32"
+    assert command[-4:] == ["--quantization", "nf4", "--kv-budget-gib", "6"]
+    assert "--offline" not in command
+    args.offline, args.worker_arg = True, []
+    assert build_command(args)[-1] == "--offline"
