@@ -2,6 +2,7 @@
 *
 !pyproject.toml
 !requirements-cuda.txt
+!requirements-vllm.txt
 !README.md
 !tensorpilot
 !deploy/runpod

@@ -36,6 +36,7 @@ RUN python -m pip install --no-deps --no-cache-dir --force-reinstall /tmp/tensor
 
 # Read-only, root-owned. Runtime output goes to /workspace, never here.
 COPY deploy/runpod /opt/tensorpilot/deploy/runpod
+COPY requirements-vllm.txt /opt/tensorpilot/requirements-vllm.txt
 COPY benchmarks/gpu /opt/tensorpilot/benchmarks/gpu
 COPY docs/v09-runpod-runbook.md docs/v09-runpod-experiment-pod.md /opt/tensorpilot/docs/
 COPY deploy/runpod/pod_sshd_config /etc/ssh/sshd_config

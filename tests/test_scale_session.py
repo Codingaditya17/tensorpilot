@@ -231,3 +231,4 @@ def test_a_crash_stage_kills_the_worker_and_audits_the_journal(tmp_path):
     assert report["passed"] is True and report["kill"]["pid"]
     assert KEY not in (directory / "fault" / "fault-report.json").read_text()
     assert not stub_alive()
+
