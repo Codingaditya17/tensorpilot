@@ -109,7 +109,10 @@ def create_app(*, workers=(), policy="capacity-aware", stale_after_s=5,
         try:
             timeout = aiohttp.ClientTimeout(total=heartbeat_total_timeout_s,
                                             connect=heartbeat_connect_timeout_s)
-            async with app[PROBE_SESSION].get(worker.url + "/health", timeout=timeout) as response:
+            # Redirects are refused: a worker never legitimately redirects, and following one would reach a host
+            # that was never checked against the allow-list.
+            async with app[PROBE_SESSION].get(worker.url + "/health", timeout=timeout,
+                                              allow_redirects=False) as response:
                 if response.status != 200:
                     raise RuntimeError(f"health_http_{response.status}")
                 health = await response.json()
@@ -353,8 +356,13 @@ def create_app(*, workers=(), policy="capacity-aware", stale_after_s=5,
         downstream = None
         worker_request_id = None
         try:
-            async with app[SESSION].post(placement.url + "/v1/generate", json=forwarded,
+            async with app[SESSION].post(placement.url + "/v1/generate", json=forwarded, allow_redirects=False,
                                          timeout=aiohttp.ClientTimeout(total=timeout + 5)) as upstream:
+                if 300 <= upstream.status < 400:
+                    outcome = "worker_redirect_refused"
+                    return _error(request, 502, "worker_redirect_refused",
+                                  "Worker answered with a redirect, which is never followed",
+                                  {"X-TensorPilot-Worker": placement.worker_id})
                 if upstream.status != 200:
                     data = await upstream.read()
                     outcome = f"worker_http_{upstream.status}"

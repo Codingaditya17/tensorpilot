@@ -209,3 +209,90 @@ def test_worker_key_is_never_sent_to_a_host_outside_the_allow_list():
                 await data.close()
                 await control.close()
     asyncio.run(scenario())
+
+
+# --- Redirects. A worker never legitimately redirects. Following one would reach a host that was never
+# checked against the allow-list, so all three calls that carry the worker credential refuse redirects.
+
+def redirect_target():
+    seen = []
+    app = web.Application()
+
+    async def record(request):
+        seen.append((request.method, request.path, request.headers.get("Authorization")))
+        return web.json_response({"ready": True})
+
+    app.router.add_route("*", "/{tail:.*}", record)
+    return app, seen
+
+
+def redirecting_worker(target_url, *, health_redirects=False, status=307):
+    """A worker whose /v1/generate (and optionally /health) answers with a redirect to another origin."""
+    app = web.Application()
+
+    async def health(request):
+        if health_redirects:
+            raise web.HTTPTemporaryRedirect(location=target_url + "/health")
+        return web.json_response(
+            {"ready": True, "active_sequences": 0, "queue_depth": 0, "execution_concurrency": 4,
+             "queue_capacity": 4, "admission": {"estimated_kv_reserved_bytes": 0,
+                                                "estimated_kv_budget_bytes": 512 * 1024**2},
+             "model": "test", "artifact_sha256": "a" * 64, "service_version": "test",
+             "instance_id": "worker-1", "execution_mode": "synthetic"})
+
+    async def generate(request):
+        redirect = web.HTTPTemporaryRedirect if status == 307 else web.HTTPFound
+        raise redirect(location=target_url + "/v1/generate")
+
+    app.router.add_get("/health", health)
+    app.router.add_post("/v1/generate", generate)
+    return app
+
+
+def test_data_plane_never_follows_a_worker_redirect_or_sends_it_the_credential():
+    async def scenario():
+        target_app, seen = redirect_target()
+        async with TestServer(target_app) as target:
+            for status in (307, 302):
+                async with TestServer(redirecting_worker(str(target.make_url("")).rstrip("/"), status=status)) as worker:
+                    control, data = await gateway(worker, data_options={"worker_api_key": WORKER_KEY})
+                    try:
+                        async with data.post("/v1/generate", json={"prompt": "hi", "max_tokens": 1}) as response:
+                            assert response.status == 502
+                            assert (await response.json())["error"]["code"] == "worker_redirect_refused"
+                        assert await in_flight_routes(control) == 0
+                    finally:
+                        await data.close()
+                        await control.close()
+            assert seen == []
+    asyncio.run(scenario())
+
+
+def test_control_plane_proxy_never_follows_a_worker_redirect():
+    async def scenario():
+        target_app, seen = redirect_target()
+        async with TestServer(target_app) as target:
+            async with TestServer(redirecting_worker(str(target.make_url("")).rstrip("/"))) as worker:
+                control_app = create_control(workers=(("worker-1", str(worker.make_url("/"))),),
+                                             probe_interval_s=10, worker_api_key=WORKER_KEY)
+                async with TestClient(TestServer(control_app)) as control:
+                    async with control.post("/v1/generate", json={"prompt": "hi", "max_tokens": 1}) as response:
+                        assert response.status == 502
+                        assert (await response.json())["error"]["code"] == "worker_redirect_refused"
+        assert seen == []
+    asyncio.run(scenario())
+
+
+def test_control_plane_health_probe_never_follows_a_redirect_and_marks_the_worker_unavailable():
+    async def scenario():
+        target_app, seen = redirect_target()
+        async with TestServer(target_app) as target:
+            async with TestServer(redirecting_worker(str(target.make_url("")).rstrip("/"), health_redirects=True)) as worker:
+                control_app = create_control(workers=(("worker-1", str(worker.make_url("/"))),),
+                                             probe_interval_s=10, worker_api_key=WORKER_KEY)
+                async with TestClient(TestServer(control_app)) as control:
+                    await asyncio.sleep(.3)
+                    async with control.get("/health") as response:
+                        assert (await response.json())["worker_counts"]["available"] == 0
+        assert seen == []
+    asyncio.run(scenario())

@@ -139,8 +139,14 @@ def create_app(*, control_url, api_key=None, control_api_key=None, max_connectio
                                   {"X-TensorPilot-Worker": route_body["worker_id"]})
                 worker_headers = {"Authorization": "Bearer " + worker_api_key}
             async with app[WORKER_SESSION].post(route_body["worker_url"] + "/v1/generate", json=forwarded,
-                                         headers=worker_headers,
+                                         headers=worker_headers, allow_redirects=False,
                                          timeout=aiohttp.ClientTimeout(total=timeout + 5)) as upstream:
+                if 300 <= upstream.status < 400:
+                    # Never followed: a redirect would reach a host that was not checked against the allow-list.
+                    outcome = "worker_redirect_refused"
+                    return _error(request, 502, "worker_redirect_refused",
+                                  "Worker answered with a redirect, which is never followed",
+                                  {"X-TensorPilot-Worker": route_body["worker_id"]})
                 if upstream.status in (401, 403):
                     # The caller authenticated to the data plane; the failure is internal. Relaying the
                     # worker's 401 would blame the caller's token, so it is reported as a gateway fault.
