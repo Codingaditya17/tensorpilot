@@ -419,11 +419,17 @@ stage_quality() {
 
 stage_probe() {
   # Needs the GPU to itself: the probe loads the model in-process, so no worker may be running (the runner starts none for this stage).
-  log "divergence probe: solo vs batched logits for ${V10_PROBE_PROMPTS:-32} prompts (prefill pack $V10_PREFILL_PACK)"
-  run_guarded timeout --signal=TERM --kill-after=60 "${V10_CAP_MINUTES}m" python3 -m tensorpilot.divergence_probe \
+  # --max-prompt-tokens is the stage's own value so the probe's KV rows, and so its granted slots, match the benchmark worker's.
+  log "divergence probe: solo vs batched logits for ${V10_PROBE_PROMPTS:-32} prompts (prefill pack $V10_PREFILL_PACK, prompt limit $V10_MAX_PROMPT_TOKENS)"
+  local rc=0
+  GUARD_OUT="$STAGE_DIR/probe.log" run_guarded timeout --signal=TERM --kill-after=60 "${V10_CAP_MINUTES}m" \
+    python3 -m tensorpilot.divergence_probe \
     --model "$V10_MODEL_REPO" --revision "$V10_REVISION" --cache-dir "$CACHE" --dtype "$V10_DTYPE" \
     --quantization "$V10_QUANT" --prompts "${V10_PROBE_PROMPTS:-32}" --prefill-pack-tokens "${V10_PREFILL_PACK:-0}" \
-    --output "$STAGE_DIR/divergence-probe.json"
+    --max-prompt-tokens "$V10_MAX_PROMPT_TOKENS" --output "$STAGE_DIR/divergence-probe.json" || rc=$?
+  # The log is part of the evidence: a failed probe must leave its traceback in the archive, not only on the terminal.
+  tail -n "$(( rc == 0 ? 3 : 30 ))" "$STAGE_DIR/probe.log" >&2 || true
+  return "$rc"
 }
 
 stage_faults() {

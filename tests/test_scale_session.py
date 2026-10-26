@@ -508,6 +508,25 @@ def test_the_probe_stage_hands_the_divergence_probe_the_stage_settings(tmp_path)
     assert pairs["--model"] == "Qwen/Qwen2.5-7B-Instruct" and pairs["--revision"] == "a09a35458c702b33eeacc393d103063234e8bc28"
     assert pairs["--dtype"] == "bfloat16" and pairs["--quantization"] == "none" and pairs["--prompts"] == "32"
     assert pairs["--prefill-pack-tokens"] == "2048" and pairs["--output"] == f"{tmp_path}/divergence-probe.json"
+    # the probe must size its KV rows like the benchmark worker (1,024-token prompt limit), or it is granted fewer slots
+    assert pairs["--max-prompt-tokens"] == "1024"
+
+
+def test_a_failing_probe_leaves_its_traceback_in_the_evidence_and_its_exit_status(tmp_path):
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    fake = binary / "python3"
+    fake.write_text('#!/bin/bash\nif [[ "$*" == *tensorpilot.divergence_probe* ]]; then\n'
+                    '  echo "RuntimeError: batch capacity exhausted" >&2; exit 1; fi\n'
+                    f'exec "{sys.executable}" "$@"\n')
+    fake.chmod(0o755)
+    environment = {**os.environ, "PATH": f"{binary}:{os.environ['PATH']}"}
+    environment.pop("TENSORPILOT_POD_MAX_MINUTES", None)
+    snippet = f'source "{SCRIPT}"; load_stage probe-7b; STAGE_DIR="{tmp_path}"; CACHE="{tmp_path}/cache"; stage_probe'
+    done = subprocess.run(["bash", "-c", snippet], env=environment, capture_output=True, text=True, cwd=ROOT)
+    assert done.returncode == 1
+    assert "batch capacity exhausted" in (tmp_path / "probe.log").read_text()
+    assert "batch capacity exhausted" in done.stderr
 
 
 def test_the_operator_packing_override_reaches_the_probe_too(tmp_path):

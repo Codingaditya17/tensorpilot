@@ -118,9 +118,18 @@ def probe(backend, *, prompts=32, dtype, capacity=None, pack_tokens=0, prefill_s
     solo_adapter.close()
     together = CUDABatchAdapter(backend, capacity=capacity, prefill_step_size=prefill_step_size,
                                 prefill_pack_tokens=pack_tokens, kv_budget_bytes=kv_budget_bytes)
+    # The pool planner grants only what fits inside the memory cap and does not raise when that is fewer than asked. A probe that
+    # silently ran fewer sequences, or crashed on the 32nd insert, would not be the experiment it claims to be: refuse up front.
+    granted, row_tokens = together.capacity, together.row_tokens
+    if granted < capacity:
+        together.close()
+        raise ValueError(f"the KV pool granted {granted} of the {capacity} slots this probe needs (rows of {row_tokens} tokens, "
+                         f"limited by {together.plan.limited_by}); lower --max-prompt-tokens or --prompts. The memory cap is not "
+                         "relaxed to make the probe fit")
     batched = run_adapter(together, texts, budgets)
     together.close()
-    return build_report(texts, solo, batched, dtype, {"capacity": capacity, "prefill_pack_tokens": pack_tokens,
+    return build_report(texts, solo, batched, dtype, {"capacity": capacity, "granted_capacity": granted,
+                                                      "row_tokens": row_tokens, "prefill_pack_tokens": pack_tokens,
                                                       "prefill_step_size": prefill_step_size})
 
 
@@ -136,6 +145,9 @@ def main():
     parser.add_argument("--allow-cpu", action="store_true", help="for local testing only")
     parser.add_argument("--prompts", type=int, default=32)
     parser.add_argument("--capacity", type=int)
+    parser.add_argument("--max-prompt-tokens", type=int, default=1024,
+                        help="sizes the KV rows (this plus 512 output tokens); the benchmark stages use 1024, and a probe with "
+                             "a different value would not share their pool")
     parser.add_argument("--prefill-pack-tokens", type=int, default=0)
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
@@ -144,7 +156,7 @@ def main():
     from .cuda_backend import CUDABackend
     backend = CUDABackend(args.model, revision=args.revision, device=args.device, dtype=args.dtype,
                           quantization=args.quantization, cache_dir=args.cache_dir, offline=args.offline,
-                          allow_cpu=args.allow_cpu)
+                          allow_cpu=args.allow_cpu, max_prompt_tokens=args.max_prompt_tokens)
     report = probe(backend, prompts=args.prompts, dtype=args.dtype, capacity=args.capacity,
                    pack_tokens=args.prefill_pack_tokens)
     Path(args.output).write_text(json.dumps(report, indent=2) + "\n")
