@@ -24,6 +24,32 @@ def cuda_device_summary(torch, device):
             "multi_processor_count": properties.multi_processor_count}
 
 
+def resolve_cuda_device(torch, device, *, allow_cpu=False):
+    """Return a ``torch.device`` with an explicit index for a CUDA request.
+
+    PyTorch allocator APIs such as ``set_per_process_memory_fraction`` reject a bare ``cuda`` device.
+    ``cuda`` resolves to the current device and ``cuda:N`` is range-checked against what PyTorch can
+    see. Indices are PyTorch's own, so they already respect ``CUDA_VISIBLE_DEVICES``, which renumbers
+    the visible devices from 0.
+    """
+    try:
+        parsed = torch.device(device)
+    except (RuntimeError, TypeError, ValueError) as exc:
+        raise ValueError(f"invalid device {device!r}: expected 'cuda' or 'cuda:<index>'") from exc
+    if parsed.type != "cuda":
+        if allow_cpu and parsed.type == "cpu":
+            return parsed
+        raise ValueError("device must be CUDA; CPU is accepted only by CPU conformance tests")
+    if not torch.cuda.is_available():
+        raise RuntimeError("PyTorch cannot see a CUDA device; check the NVIDIA driver and container runtime")
+    count = torch.cuda.device_count()
+    index = parsed.index if parsed.index is not None else torch.cuda.current_device()
+    if not 0 <= index < count:
+        raise ValueError(f"CUDA device index {index} is out of range: PyTorch sees {count} device(s) "
+                         "(CUDA_VISIBLE_DEVICES renumbers the visible devices from 0)")
+    return torch.device("cuda", index)
+
+
 class CUDABackend:
     backend_name = "cuda"
 
@@ -41,15 +67,11 @@ class CUDABackend:
         if type(memory_fraction) not in (int, float) or not 0 < memory_fraction <= 1:
             raise ValueError("memory_fraction must be in (0, 1]")
         self.torch = torch
-        self.device = torch.device(device)
+        self.device = resolve_cuda_device(torch, device, allow_cpu=allow_cpu)
         if self.device.type == "cuda":
-            if not torch.cuda.is_available():
-                raise RuntimeError("PyTorch cannot see a CUDA device; check the NVIDIA driver and container runtime")
             # A per-process cap turns runaway allocation into a per-request OOM instead of
-            # starving other processes sharing the GPU.
+            # starving other processes sharing the GPU. The device must carry an explicit index.
             torch.cuda.set_per_process_memory_fraction(memory_fraction, self.device)
-        elif not (allow_cpu and self.device.type == "cpu"):
-            raise ValueError("device must be CUDA; CPU is accepted only by CPU conformance tests")
         self.max_prompt_tokens = max_prompt_tokens
         self.oom_events = 0
         path, self.provenance = resolve_model(model_name, revision=revision, offline=offline,

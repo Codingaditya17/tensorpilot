@@ -9,6 +9,8 @@ on:
     paths:
       - deploy/docker/Dockerfile.experiment*
       - deploy/runpod/**
+      - tensorpilot/**
+      - pyproject.toml
       - benchmarks/gpu/**
       - docs/v09-runpod-*.md
       - .github/workflows/experiment-image.yml
@@ -37,6 +39,7 @@ jobs:
           load: true
           push: false
           tags: tensorpilot-exp:ci
+          build-args: SOURCE_SHA=${{ github.sha }}
       - name: Verify SSH hardening, permissions, evidence path and shutdown (no GPU)
         run: deploy/runpod/test-pod-image.sh tensorpilot-exp:ci --slow
 
@@ -68,3 +71,4 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: ${{ steps.image.outputs.name }}:${{ steps.image.outputs.tag }}
+          build-args: SOURCE_SHA=${{ github.sha }}

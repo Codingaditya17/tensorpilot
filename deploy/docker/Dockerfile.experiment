@@ -17,6 +17,17 @@ RUN apt-get update \
  && mkdir -p /run/sshd \
  && usermod --shell /bin/bash --password '*' tensorpilot
 
+# The experiment runs the tensorpilot source of the commit this image is built from, installed over the
+# base image's copy (dependencies are already in the base). The production image is not modified, so
+# a production tag keeps the code it was built with until a production release is cut deliberately.
+# The base image also keeps its source in /app, which Python would load first from that directory, so the
+# stale copy is removed in this layer only (the base layers are unchanged) and the check runs in isolated mode, which ignores the working directory.
+COPY pyproject.toml README.md /tmp/tensorpilot-src/
+COPY tensorpilot /tmp/tensorpilot-src/tensorpilot
+RUN python -m pip install --no-deps --no-cache-dir --force-reinstall /tmp/tensorpilot-src \
+ && rm -rf /tmp/tensorpilot-src /app/tensorpilot \
+ && python -I -c "import tensorpilot.cuda_backend as m; assert m.__file__.startswith('/usr/local/lib/'), m.__file__; m.resolve_cuda_device"
+
 # Read-only, root-owned. Runtime output goes to /workspace, never here.
 COPY deploy/runpod /opt/tensorpilot/deploy/runpod
 COPY benchmarks/gpu /opt/tensorpilot/benchmarks/gpu
@@ -39,6 +50,9 @@ WORKDIR /opt/tensorpilot
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD ["bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/22"]
+
+ARG SOURCE_SHA=unknown
+LABEL org.opencontainers.image.revision=$SOURCE_SHA
 
 ENTRYPOINT ["/opt/tensorpilot/deploy/runpod/pod-entrypoint.sh"]
 STOPSIGNAL SIGTERM

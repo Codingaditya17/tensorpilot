@@ -7,7 +7,8 @@ torch = pytest.importorskip("torch")
 pytest.importorskip("transformers")
 
 from tiny_model import EOS_ID, make_tiny_model_dir  # noqa: E402
-from tensorpilot.cuda_backend import CUDABackend  # noqa: E402
+from tensorpilot import cuda_backend  # noqa: E402
+from tensorpilot.cuda_backend import CUDABackend, resolve_cuda_device  # noqa: E402
 from tensorpilot.engine import Engine  # noqa: E402
 
 PROMPT = "hello world the"
@@ -200,3 +201,85 @@ def test_closing_a_stream_releases_cache_references(model_dir):
     gc.collect()
     assert refs and all(ref() is None for ref in refs)
     del backend.model.forward
+
+
+# --- CUDA device selection. These run without a GPU by faking only what a GPU would answer
+# (availability, device count, current device); PyTorch's own index validation stays real.
+
+class _Stop(Exception):
+    """Raised by the patched model resolver to end construction right after device setup."""
+
+
+def fake_cuda(monkeypatch, *, count=1, current=0):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: count)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: current)
+    calls = []
+
+    def strict_set_fraction(fraction, device=None):
+        # Same validation torch.cuda.set_per_process_memory_fraction applies before touching the GPU.
+        index = torch._utils._get_device_index(device)
+        calls.append((fraction, torch.device("cuda", index)))
+
+    monkeypatch.setattr(torch.cuda, "set_per_process_memory_fraction", strict_set_fraction)
+    return calls
+
+
+@pytest.fixture
+def stop_after_device(monkeypatch):
+    def stop(*args, **kwargs):
+        raise _Stop
+
+    monkeypatch.setattr(cuda_backend, "resolve_model", stop)
+
+
+def test_torch_rejects_a_bare_cuda_device_which_is_what_failed_on_the_gpu(monkeypatch):
+    if not hasattr(torch, "_utils") or not hasattr(torch._utils, "_get_device_index"):
+        pytest.skip("this PyTorch does not expose the index validator")
+    fake_cuda(monkeypatch)
+    with pytest.raises(ValueError, match="specified index"):
+        torch.cuda.set_per_process_memory_fraction(.9, torch.device("cuda"))
+
+
+@pytest.mark.parametrize("requested", ["cuda", "cuda:0", torch.device("cuda"), torch.device("cuda", 0)])
+def test_constructor_gives_the_allocator_an_explicit_index(monkeypatch, model_dir, stop_after_device, requested):
+    calls = fake_cuda(monkeypatch)
+    with pytest.raises(_Stop):
+        CUDABackend(str(model_dir), device=requested, memory_fraction=.8)
+    assert calls == [(.8, torch.device("cuda", 0))]
+
+
+def test_bare_cuda_follows_the_current_device_and_explicit_index_is_honored(monkeypatch, model_dir, stop_after_device):
+    calls = fake_cuda(monkeypatch, count=2, current=1)
+    with pytest.raises(_Stop):
+        CUDABackend(str(model_dir), device="cuda")
+    with pytest.raises(_Stop):
+        CUDABackend(str(model_dir), device="cuda:0")
+    assert [device for _, device in calls] == [torch.device("cuda", 1), torch.device("cuda", 0)]
+
+
+@pytest.mark.parametrize("requested", ["cuda:1", "cuda:7"])
+def test_out_of_range_index_fails_clearly_before_any_allocator_call(monkeypatch, model_dir, requested):
+    calls = fake_cuda(monkeypatch, count=1)
+    with pytest.raises(ValueError, match="out of range.*sees 1 device.*CUDA_VISIBLE_DEVICES"):
+        CUDABackend(str(model_dir), device=requested)
+    assert calls == []
+
+
+@pytest.mark.parametrize("requested", ["cuda:x", "cuda:-1", "cuda:1:2", "cuda ", "gpu", "", "cuda:01"])
+def test_malformed_device_names_fail_clearly(monkeypatch, model_dir, requested):
+    calls = fake_cuda(monkeypatch)
+    with pytest.raises(ValueError, match="invalid device"):
+        CUDABackend(str(model_dir), device=requested)
+    assert calls == []
+
+
+def test_non_cuda_devices_and_missing_cuda_keep_their_errors(monkeypatch, model_dir):
+    with pytest.raises(ValueError, match="CPU is accepted only"):
+        resolve_cuda_device(torch, "cpu")
+    assert resolve_cuda_device(torch, "cpu", allow_cpu=True) == torch.device("cpu")
+    with pytest.raises(ValueError, match="CPU is accepted only"):
+        resolve_cuda_device(torch, "meta", allow_cpu=True)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    with pytest.raises(RuntimeError, match="cannot see a CUDA device"):
+        resolve_cuda_device(torch, "cuda:0")

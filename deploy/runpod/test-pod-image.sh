@@ -40,6 +40,7 @@ refuses "password login refused" ssh -p "$PORT" -o PubkeyAuthentication=no -o Pr
 check "non-root can write evidence dir" pod 'touch "$TENSORPILOT_RESULTS_ROOT/w" && rm "$TENSORPILOT_RESULTS_ROOT/w"'
 check "non-root can write model cache dir" pod 'touch "$TENSORPILOT_CACHE_DIR/w" && rm "$TENSORPILOT_CACHE_DIR/w"'
 refuses "scripts and configs are read-only" pod 'touch /opt/tensorpilot/benchmarks/gpu/x'
+check "image carries the explicit-device CUDA backend (not the base image copy)" pod 'cd /app && python3 -c "import tensorpilot.cuda_backend as m; assert m.__file__.startswith(\"/usr/local/lib/\"); m.resolve_cuda_device"'
 check "benchmark configs shipped" pod 'test -f benchmarks/gpu/v09-first-30min.json && test -f benchmarks/gpu/v09-single-gpu.json'
 check "non-secret settings reach SSH sessions" pod '[ -n "$TENSORPILOT_MODEL" ] && [ "$TENSORPILOT_REVISION" = 7ae557604adf67be50417f59c2c2f167def9a775 ] && [ "$HF_HOME" = /workspace/huggingface ] && [ "$TENSORPILOT_CACHE_DIR" = /workspace/huggingface ] && [ "$TENSORPILOT_RESULTS_ROOT" = /workspace/results ]'
 refuses "API keys are not forwarded or stored" pod 'env | grep -q API_KEY || grep -rq API_KEY /etc/profile.d'

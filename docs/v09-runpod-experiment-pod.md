@@ -6,12 +6,25 @@ a separate package, so the production image is untouched.
 
 | | |
 |---|---|
-| Image | `ghcr.io/codingaditya17/tensorpilot/cuda-experiment:v0.9.1-2` |
+| Image | `ghcr.io/codingaditya17/tensorpilot/cuda-experiment:v0.9.1-3` |
 | Built from | `ghcr.io/codingaditya17/tensorpilot/cuda@sha256:afdc5dc6646040cb486654cc6722a20f2d21a9c080f96ac5f33145a6a1da825a` (v0.9.1) |
-| Published by | git tag `exp-v0.9.1-2` (workflow `experiment-image.yml`). Never moved: a fix gets `exp-v0.9.1-3`. |
+| Published by | git tag `exp-v0.9.1-3` (workflow `experiment-image.yml`). Never moved: a fix gets `exp-v0.9.1-4`. |
 | Registry login | none; the package must be public (check anonymously before renting) |
 
-Nothing here has run on a GPU. The image behavior below was verified without one by
+## Revision history
+
+| Tag | Status |
+|---|---|
+| `v0.9.1-1` | broken: crashed when the volume refused `chown` |
+| `v0.9.1-2` | broken: the preflight smoke failed on a real RTX 4090 with `ValueError: Expected a torch.device with a specified index` (bare `cuda` passed to `set_per_process_memory_fraction`) |
+| `v0.9.1-3` | current: device resolved to an explicit index (`cuda` becomes `cuda:<current>`, `cuda:N` is range-checked); preflight writes a redacted traceback file |
+
+This image installs the repository's `tensorpilot` source over the base image's copy (and removes the base
+image's `/app/tensorpilot`, which Python would load first from `/app`). The production image
+`cuda:v0.9.1` was not modified and still contains the old backend, so it has the device bug until a production
+release is cut deliberately.
+
+Nothing here has run on a GPU successfully. The image behavior below was verified without one by
 `deploy/runpod/test-pod-image.sh`.
 
 ## Runpod settings

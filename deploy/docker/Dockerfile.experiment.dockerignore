@@ -1,5 +1,8 @@
-# Allowlist: the experiment image gets only the scripts, configs and docs it needs.
+# Allowlist: the experiment image gets only the package source, scripts, configs and docs it needs.
 *
+!pyproject.toml
+!README.md
+!tensorpilot
 !deploy/runpod
 !benchmarks/gpu
 !docs/v09-runpod-runbook.md
