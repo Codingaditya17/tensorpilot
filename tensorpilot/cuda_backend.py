@@ -10,6 +10,7 @@ without the CUDA stack, and only constructing a backend requires it.
 """
 from .artifacts import resolve_model
 from .backend import Token
+from . import quantization as quant
 
 DTYPES = ("float16", "bfloat16", "float32")
 DEFAULT_MEMORY_FRACTION = .9
@@ -55,13 +56,17 @@ class CUDABackend:
 
     def __init__(self, model_name, *, max_prompt_tokens=2048, revision=None, offline=False,
                  device="cuda", dtype="float16", memory_fraction=DEFAULT_MEMORY_FRACTION,
-                 cache_dir=None, allow_cpu=False):
+                 cache_dir=None, allow_cpu=False, quantization="none"):
         import torch
         import transformers
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
         if dtype not in DTYPES:
             raise ValueError(f"dtype must be one of {DTYPES}")
+        quant.validate_mode(quantization)
+        if quantization != "none" and dtype == "float32" and not allow_cpu:
+            # fp32 compute is accepted only by CPU conformance tests; the GPU modes compute in fp16 or bf16.
+            raise ValueError("nf4 quantization computes in float16 or bfloat16; choose --dtype accordingly")
         if type(max_prompt_tokens) is not int or max_prompt_tokens < 1:
             raise ValueError("max_prompt_tokens must be a positive integer")
         if type(memory_fraction) not in (int, float) or not 0 < memory_fraction <= 1:
@@ -72,20 +77,33 @@ class CUDABackend:
             # A per-process cap turns runaway allocation into a per-request OOM instead of
             # starving other processes sharing the GPU. The device must carry an explicit index.
             torch.cuda.set_per_process_memory_fraction(memory_fraction, self.device)
+        quant.require_stack(quantization)  # raises, never falls back to another precision
+        self.quantization = quantization
+        self.compute_dtype = getattr(torch, dtype)
         self.max_prompt_tokens = max_prompt_tokens
         self.oom_events = 0
         path, self.provenance = resolve_model(model_name, revision=revision, offline=offline,
                                               cache_dir=cache_dir)
         self.tokenizer = AutoTokenizer.from_pretrained(path)
-        self.model = AutoModelForCausalLM.from_pretrained(path, dtype=getattr(torch, dtype))
-        self.model = self.model.to(self.device).eval()
+        if quantization == "none":
+            self.model = AutoModelForCausalLM.from_pretrained(path, dtype=self.compute_dtype)
+            self.model = self.model.to(self.device).eval()
+        else:
+            # Weights are quantized shard by shard straight onto the device; a quantized model cannot be moved
+            # afterwards, so the target device is fixed here.
+            device_map = {"": self.device.index} if self.device.type == "cuda" else {"": "cpu"}
+            self.model = AutoModelForCausalLM.from_pretrained(
+                path, dtype=self.compute_dtype, device_map=device_map,
+                quantization_config=quant.make_config(quantization, self.compute_dtype)).eval()
+        self.weights_resident_bytes = quant.resident_weight_bytes(self.model)
         self.eos_token_ids = _eos_token_ids(self.model, self.tokenizer)
         context = getattr(self.model.config, "max_position_embeddings", None)
         self.context_tokens = int(context) if isinstance(context, int) and context > 0 else None
         gpu = cuda_device_summary(torch, self.device) if self.device.type == "cuda" else None
         self.provenance.update({
             "backend": self.backend_name, "device": str(self.device), "gpu": gpu,
-            "model_dtype": dtype, "cuda_memory_fraction": memory_fraction if gpu else None,
+            "model_dtype": dtype, "quantization": quant.describe(self.model, quantization, self.compute_dtype),
+            "weights_resident_bytes": self.weights_resident_bytes, "cuda_memory_fraction": memory_fraction if gpu else None,
             "cuda_runtime": torch.version.cuda, "cudnn_version": torch.backends.cudnn.version(),
             "torch_version": torch.__version__, "transformers_version": transformers.__version__,
             "decoding": "greedy, explicit KV cache, one sequence per backend",

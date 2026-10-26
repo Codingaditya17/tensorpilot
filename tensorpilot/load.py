@@ -5,14 +5,17 @@ import json
 import math
 import os
 import platform
+import random
+import statistics
 import time
 import uuid
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
 import aiohttp
 
-from .workloads import build_workload, fingerprint, validate_workload
+from .workloads import build_spec_workload, build_workload, fingerprint, validate_workload
 from .reporting import write_json
 from .journal import Journal
 from .protocol import StreamProtocolError, StreamValidator, decode_event
@@ -29,27 +32,59 @@ def percentile(values, fraction):
     return values[low] + (values[high] - values[low]) * (rank - low)
 
 
-def summarize(records, wall_s):
+def outcome_of(record):
+    """The single terminal outcome of a request. Records from older runs have only ``ok``."""
+    return record.get("outcome") or ("completed" if record["ok"] else "failed")
+
+
+def _mean_itl(record):
+    return record.get("client_tpot_s")
+
+
+def summarize(records, wall_s, slo=None):
     if wall_s <= 0:
         raise ValueError("wall_s must be positive")
-    completed = [r for r in records if r["ok"]]
-    rejected = sum(r.get("error_code") == "overloaded" for r in records)
+    # A request the client cancelled on purpose is not an error; it is counted on its own.
+    cancelled = [r for r in records if outcome_of(r) == "client_cancelled"]
+    counted = [r for r in records if outcome_of(r) != "client_cancelled"]
+    completed = [r for r in counted if r["ok"]]
+    rejected = sum(r.get("error_code") == "overloaded" for r in counted)
     latencies = [r["client_elapsed_s"] for r in completed]
     tokens = sum(r["server"]["generated_tokens"] for r in completed)
     inter_token = [value for record in completed
                    for value in record["server"].get("inter_token_latency_s", [])]
+    client_itl = [value for record in completed for value in record.get("client_inter_token_s", [])]
+    ttfts = [r["client_ttft_s"] for r in completed if r["client_ttft_s"] is not None]
     phase_profiles = [record["server"].get("phase_profile", {}) for record in completed]
+    # Active window: first token produced to last token produced, across all completed requests. Unlike
+    # wall time it excludes ramp-up (queue fill) and the drain tail, so it approximates steady throughput.
+    firsts = [r["dispatch_offset_s"] + r["client_ttft_s"] for r in completed if r.get("client_ttft_s") is not None]
+    lasts = [r["dispatch_offset_s"] + r["client_last_token_s"] for r in completed
+             if r.get("client_last_token_s") is not None]
+    window = (max(lasts) - min(firsts)) if firsts and lasts else None
     result = {
-        "successful_requests": len(completed), "failed_requests": len(records) - len(completed),
+        "requests_total": len(records),
+        "successful_requests": len(completed), "failed_requests": len(counted) - len(completed),
         "rejected_requests": rejected,
-        "error_rate": (len(records) - len(completed)) / len(records) if records else None,
-        "rejection_rate": rejected / len(records) if records else None,
+        "client_cancelled_requests": len(cancelled),
+        "timed_out_requests": sum(outcome_of(r) == "timed_out" for r in counted),
+        "outcomes": dict(sorted(Counter(outcome_of(r) for r in records).items())),
+        "errors_by_code": dict(sorted(Counter(r.get("error_code") for r in counted if not r["ok"]).items(),
+                                      key=lambda item: str(item[0]))),
+        "error_rate": (len(counted) - len(completed)) / len(counted) if counted else None,
+        "rejection_rate": rejected / len(counted) if counted else None,
         "wall_s": wall_s, "successful_requests_per_s": len(completed) / wall_s,
         "completed_output_tokens": tokens, "completed_output_tokens_per_s": tokens / wall_s,
+        "active_window_s": window,
+        "active_window_output_tokens_per_s": tokens / window if window and window > 0 else None,
+        "mean_output_tokens_per_request": tokens / len(completed) if completed else None,
         **{f"p{p}_client_latency_s": percentile(latencies, p / 100) for p in (50, 95, 99)},
-        "p95_client_ttft_s": percentile([r["client_ttft_s"] for r in completed
-                                         if r["client_ttft_s"] is not None], .95),
+        **{f"p{p}_client_ttft_s": percentile(ttfts, p / 100) for p in (50, 95, 99)},
+        **{f"p{p}_client_tpot_s": percentile([v for v in map(_mean_itl, completed) if v is not None], p / 100)
+           for p in (50, 95, 99)},
+        **{f"p{p}_client_inter_token_s": percentile(client_itl, p / 100) for p in (50, 95, 99)},
         "p95_queue_wait_s": percentile([r["server"]["queue_wait_s"] for r in completed], .95),
+        "p99_queue_wait_s": percentile([r["server"]["queue_wait_s"] for r in completed], .99),
         "p95_inter_token_latency_s": percentile(inter_token, .95),
         "median_request_observed_prefill_execution_s": percentile(
             [profile["prefill_execution_s"] for profile in phase_profiles
@@ -60,13 +95,32 @@ def summarize(records, wall_s):
         "max_queue_wait_s": max((r["server"]["queue_wait_s"] for r in completed), default=None),
         "p95_dispatch_lag_s": percentile([r.get("dispatch_lag_s", 0) for r in records], .95),
         "partial_output_tokens_on_failure": sum(r.get("received_output_tokens", 0)
-                                                 for r in records if not r["ok"]),
+                                                 for r in counted if not r["ok"]),
     }
+    if slo:
+        def good(record):
+            if not record["ok"]:
+                return False
+            if "ttft_s" in slo and (record["client_ttft_s"] is None or record["client_ttft_s"] > slo["ttft_s"]):
+                return False
+            if "e2e_s" in slo and record["client_elapsed_s"] > slo["e2e_s"]:
+                return False
+            if "tpot_s" in slo and (record.get("client_tpot_s") or 0) > slo["tpot_s"]:
+                return False
+            return True
+
+        winners = [r for r in counted if good(r)]
+        result["slo"] = {"definition": dict(slo), "good_requests": len(winners),
+                         "attainment": len(winners) / len(counted) if counted else None,
+                         "goodput_requests_per_s": len(winners) / wall_s,
+                         "goodput_output_tokens_per_s":
+                             sum(r["server"]["generated_tokens"] for r in winners) / wall_s,
+                         "note": "a request is good only if it completed and met every declared threshold"}
     return result
 
 
-def class_summaries(records, wall_s):
-    return {label: summarize([record for record in records if record["class"] == label], wall_s)
+def class_summaries(records, wall_s, slo=None):
+    return {label: summarize([record for record in records if record["class"] == label], wall_s, slo)
             for label in sorted({record["class"] for record in records})}
 
 
@@ -93,52 +147,106 @@ async def request_one(session, url, index, args, scheduled, experiment_start, it
               "dispatch_offset_s": started - experiment_start,
               "dispatch_lag_s": max(0, started - scheduled),
               "client_ttft_s": None, "client_token_times_s": [], "received_output_tokens": 0}
+    for field in ("prompt_tokens", "cancel_after_tokens", "cancel_after_s"):
+        if field in item:
+            record[field] = item[field]
+    timeout_s = item.get("timeout_s", args.timeout)
+    cancel_tokens, cancel_s = item.get("cancel_after_tokens"), item.get("cancel_after_s")
+    scope = None
     try:
-        async with session.post(url + "/v1/generate", json={"prompt": record["prompt"],
-                                "max_tokens": item["max_tokens"], "timeout_s": args.timeout},
-                                timeout=aiohttp.ClientTimeout(total=args.timeout + 5)) as response:
-            record["http_status"] = response.status
-            record["request_id"] = response.headers.get("X-Request-ID")
-            if response.status != 200:
-                record["error"] = (await response.text())[:500]
-                try:
-                    record["error_code"] = json.loads(record["error"])["error"]["code"]
-                except (ValueError, KeyError, TypeError):
-                    record["error_code"] = "http_error"
-            else:
-                validator = StreamValidator(record["request_id"], item["max_tokens"])
-                async for line in response.content:
-                    event = decode_event(line)
-                    validator.feed(event)
-                    if event["type"] == "token" and event["output"]:
-                        elapsed = time.perf_counter() - started
-                        if record["client_ttft_s"] is None:
-                            record["client_ttft_s"] = elapsed
-                        record["client_token_times_s"].append(elapsed)
-                        record["received_output_tokens"] += 1
-                    elif event["type"] == "error":
-                        record["error"] = event["error"]
-                        record["error_code"] = event.get("code", "inference_error")
-                        break
-                    elif event["type"] == "done":
-                        record["server"] = event
-                        record["ok"] = event["generated_tokens"] == record["received_output_tokens"]
-                        if not record["ok"]:
-                            record["error"] = "client/server output token counts disagree"
-                            record["error_code"] = "token_count_mismatch"
-                        break
-                if not record["ok"] and "error" not in record:
-                    record["error"] = "stream ended without done event"
-                    record["error_code"] = "incomplete_stream"
+        # Client-side cancellation timer: it can fire while the request is queued or while it decodes.
+        async with asyncio.timeout(cancel_s) as scope:
+            async with session.post(url + "/v1/generate", json={"prompt": record["prompt"],
+                                    "max_tokens": item["max_tokens"], "timeout_s": timeout_s},
+                                    timeout=aiohttp.ClientTimeout(total=timeout_s + 5)) as response:
+                record["http_status"] = response.status
+                record["request_id"] = response.headers.get("X-Request-ID")
+                record["worker_id"] = response.headers.get("X-TensorPilot-Worker")
+                if response.status != 200:
+                    record["error"] = (await response.text())[:500]
+                    try:
+                        record["error_code"] = json.loads(record["error"])["error"]["code"]
+                    except (ValueError, KeyError, TypeError):
+                        record["error_code"] = "http_error"
+                else:
+                    validator = StreamValidator(record["request_id"], item["max_tokens"])
+                    async for line in response.content:
+                        event = decode_event(line)
+                        validator.feed(event)
+                        if event["type"] == "token" and event["output"]:
+                            elapsed = time.perf_counter() - started
+                            if record["client_ttft_s"] is None:
+                                record["client_ttft_s"] = elapsed
+                            record["client_token_times_s"].append(elapsed)
+                            record["received_output_tokens"] += 1
+                            if cancel_tokens and record["received_output_tokens"] >= cancel_tokens:
+                                record["cancelled"] = True  # leaving the stream closes the connection
+                                break
+                        elif event["type"] == "error":
+                            record["error"] = event["error"]
+                            record["error_code"] = event.get("code", "inference_error")
+                            break
+                        elif event["type"] == "done":
+                            record["server"] = event
+                            record["ok"] = event["generated_tokens"] == record["received_output_tokens"]
+                            if not record["ok"]:
+                                record["error"] = "client/server output token counts disagree"
+                                record["error_code"] = "token_count_mismatch"
+                            break
+                    if not record["ok"] and "error" not in record and not record.get("cancelled"):
+                        record["error"] = "stream ended without done event"
+                        record["error_code"] = "incomplete_stream"
     except StreamProtocolError as exc:
         record["error"], record["error_code"] = str(exc), exc.code
     except (aiohttp.ClientError, TimeoutError, ValueError, KeyError, TypeError) as exc:
-        record["error"] = repr(exc)
-        record["error_code"] = "transport_error" if isinstance(exc, (aiohttp.ClientError, TimeoutError)) else "invalid_stream"
+        if isinstance(exc, TimeoutError) and scope is not None and scope.expired():
+            record["cancelled"] = True
+        else:
+            record["error"] = repr(exc)
+            record["error_code"] = ("transport_error" if isinstance(exc, (aiohttp.ClientError, TimeoutError))
+                                    else "invalid_stream")
+            record["client_timeout"] = isinstance(exc, TimeoutError)
     record["client_elapsed_s"] = time.perf_counter() - started
     times = record["client_token_times_s"]
     record["client_inter_token_s"] = [b - a for a, b in zip(times, times[1:])]
+    record["client_tpot_s"] = statistics.fmean(record["client_inter_token_s"]) if record["client_inter_token_s"] else None
+    record["client_last_token_s"] = times[-1] if times else None
+    if record["ok"]:
+        record["outcome"] = "completed"
+    elif record.get("cancelled"):
+        record["outcome"] = "client_cancelled"
+        record.pop("error", None)
+        record.pop("error_code", None)
+    elif record.get("error_code") == "overloaded":
+        record["outcome"] = "rejected"
+    elif (record.get("error_code") == "deadline_exceeded" or record.get("client_timeout")
+          or (record.get("error_code") == "incomplete_stream" and record["client_elapsed_s"] >= 0.9 * timeout_s)):
+        # The server's handler closes a stream at the deadline without a terminal event, so a stream that
+        # ends near the client's own deadline is a timeout, not a transport failure.
+        record["outcome"] = "timed_out"
+    else:
+        record["outcome"] = "failed"
     return record
+
+
+def arrival_offsets(args, count):
+    """Scheduled arrival offsets in seconds for open-loop runs; None for closed loop."""
+    rate = args.rate
+    if not rate:
+        return None
+    mode = getattr(args, "arrival", "uniform")
+    if mode == "uniform":
+        return [index / rate for index in range(count)]
+    if mode == "poisson":
+        rng, clock, offsets = random.Random(getattr(args, "seed", 42)), 0.0, []
+        for _ in range(count):
+            offsets.append(clock)
+            clock += rng.expovariate(rate)
+        return offsets
+    if mode == "burst":
+        size = getattr(args, "burst_size", 8)
+        return [(index // size) * (size / rate) for index in range(count)]
+    raise ValueError("arrival must be uniform, poisson or burst")
 
 
 def validate_config(args):
@@ -159,12 +267,27 @@ def validate_config(args):
         raise ValueError("requests exceeds the configured max_requests safety cap")
     if getattr(args, "compact", False) and not getattr(args, "journal", None):
         raise ValueError("compact reports require a raw request journal")
+    if getattr(args, "arrival", "uniform") not in ("uniform", "poisson", "burst"):
+        raise ValueError("arrival must be uniform, poisson or burst")
+    if getattr(args, "arrival", "uniform") != "uniform" and not args.rate:
+        raise ValueError("poisson and burst arrivals need a nonzero --rate")
+    if type(getattr(args, "burst_size", 8)) is not int or not 1 <= getattr(args, "burst_size", 8) <= 1024:
+        raise ValueError("burst_size must be in 1..1024")
+    slo = getattr(args, "slo", None)
+    if slo is not None:
+        if not isinstance(slo, dict) or not slo or set(slo) - {"ttft_s", "e2e_s", "tpot_s"}:
+            raise ValueError("slo must be an object with ttft_s, e2e_s and/or tpot_s")
+        if not all(type(v) in (int, float) and math.isfinite(v) and v > 0 for v in slo.values()):
+            raise ValueError("slo thresholds must be positive finite numbers")
 
 
 async def run(args):
     validate_config(args)
     workload_path = getattr(args, "workload_file", None)
-    if workload_path:
+    spec_path = getattr(args, "workload_spec", None)
+    if spec_path:
+        plan = validate_workload(build_spec_workload(json.loads(Path(spec_path).read_text()), args.requests))
+    elif workload_path:
         plan = validate_workload(json.loads(Path(workload_path).read_text()))
         if len(plan) != args.requests:
             raise ValueError("--requests must match workload-file request count")
@@ -190,7 +313,8 @@ async def run(args):
                     "server": server, "config": vars(args),
                     "workload_sha256": fingerprint(plan), "workload": plan,
                     "workload_repeats": duration is not None,
-                    "arrival_mode": "paced, concurrency-capped; inspect dispatch lag" if args.rate else "closed loop",
+                    "arrival_mode": (f"{getattr(args, 'arrival', 'uniform')} arrivals, concurrency-capped; inspect "
+                                     "dispatch lag" if args.rate else "closed loop"),
                     "request_records": "compact; full records in journal" if getattr(args, "compact", False) else "full",
                     "timings": "monotonic clock; client includes HTTP; server TTFT includes queue",
                     "throughput": "successful output tokens / measured workload wall time, including drain",
@@ -201,6 +325,7 @@ async def run(args):
         # Fixed workers and a request cap bound task/record growth during soak runs.
         next_index = 0
         records = []
+        offsets = arrival_offsets(args, limit)
         start = time.perf_counter()
         stop_at = start + duration if duration is not None else math.inf
 
@@ -209,7 +334,7 @@ async def run(args):
             while next_index < limit and time.perf_counter() < stop_at:
                 index = next_index
                 next_index += 1
-                scheduled = start + index / args.rate if args.rate else time.perf_counter()
+                scheduled = start + offsets[index] if offsets else time.perf_counter()
                 if scheduled >= stop_at:
                     return
                 await asyncio.sleep(max(0, scheduled - time.perf_counter()))
@@ -252,7 +377,8 @@ async def run(args):
         server.get("runtime_profile"),
         (metadata.get("server_after") or {}).get("runtime_profile"))
     return {"schema_version": 3, "metadata": metadata,
-            "summary": summarize(records, wall_s), "by_class": class_summaries(records, wall_s),
+            "summary": summarize(records, wall_s, getattr(args, "slo", None)),
+            "by_class": class_summaries(records, wall_s, getattr(args, "slo", None)),
             "requests": sorted(records, key=lambda r: r["index"])}
 
 
@@ -268,6 +394,13 @@ def main():
     parser.add_argument("--output", default=f"results/load_{stamp}_{uuid.uuid4().hex[:6]}.json")
     parser.add_argument("--workload", choices=("uniform", "mixed"), default="uniform")
     parser.add_argument("--workload-file", help="validated JSON plan; --requests must match its length")
+    parser.add_argument("--workload-spec", help="declarative workload spec (JSON); builds --requests items")
+    parser.add_argument("--arrival", choices=("uniform", "poisson", "burst"), default="uniform",
+                        help="open-loop arrival process when --rate is nonzero")
+    parser.add_argument("--burst-size", type=int, default=8, help="requests per burst for --arrival burst")
+    parser.add_argument("--slo-ttft", type=float, help="goodput: max time to first token, seconds")
+    parser.add_argument("--slo-e2e", type=float, help="goodput: max end-to-end latency, seconds")
+    parser.add_argument("--slo-tpot", type=float, help="goodput: max mean inter-token latency, seconds")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--duration", dest="duration_s", type=float,
                         help="repeat the request plan for this many seconds, then drain active requests")
@@ -277,6 +410,9 @@ def main():
     parser.add_argument("--compact", action="store_true", help="keep token arrays only in the raw journal")
     parser.add_argument("--overwrite", action="store_true", help="explicitly replace an existing report/journal")
     args = parser.parse_args()
+    slo = {key: value for key, value in (("ttft_s", args.slo_ttft), ("e2e_s", args.slo_e2e),
+                                         ("tpot_s", args.slo_tpot)) if value is not None}
+    args.slo = slo or None
     path = Path(args.output)
     args.journal = args.journal or str(path.with_suffix(".requests.jsonl"))
     if Path(args.journal).resolve() == path.resolve():

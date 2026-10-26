@@ -47,3 +47,10 @@ def make_tiny_qwen2_model(*, seed=1):
                          eos_token_id=EOS_ID, bos_token_id=None, pad_token_id=None)
     torch.manual_seed(seed)
     return Qwen2ForCausalLM(config).eval()
+
+
+def save_tiny_qwen2_model(directory, *, seed=1):
+    """Write the in-memory Qwen2 model to disk so a quantized load can read it with from_pretrained."""
+    model = make_tiny_qwen2_model(seed=seed)
+    model.save_pretrained(directory)
+    return directory

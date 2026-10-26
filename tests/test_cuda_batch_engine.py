@@ -31,15 +31,15 @@ def prompt_of(length, seed):
     return " ".join(rng.choice(WORDS) for _ in range(length))
 
 
-def reference(model_dir, prompt, max_tokens):
-    backend = CUDABackend(str(model_dir), device="cpu", allow_cpu=True, dtype="float32")
+def reference(model_dir, prompt, max_tokens, mode="none"):
+    backend = CUDABackend(str(model_dir), device="cpu", allow_cpu=True, dtype="float32", quantization=mode)
     return [t.token_id for t in backend.stream(prompt, max_tokens) if t.output]
 
 
 class Server:
-    def __init__(self, model_dir, *, batch_size=4, queue_size=16, hook=None, **options):
+    def __init__(self, model_dir, *, batch_size=4, queue_size=16, hook=None, mode="none", **options):
         def factory():
-            return CUDABackend(str(model_dir), device="cpu", allow_cpu=True, dtype="float32")
+            return CUDABackend(str(model_dir), device="cpu", allow_cpu=True, dtype="float32", quantization=mode)
 
         self.app = create_app(factory, execution="batch", batch_size=batch_size, queue_size=queue_size,
                               prefill_step_size=8, warmup=False, api_key=KEY,
@@ -101,12 +101,13 @@ def terminal(events):
     return events[-1]
 
 
-def test_concurrent_streams_are_correct_and_actually_batched(model_dir):
+@pytest.mark.parametrize("mode", ["none", "nf4"])
+def test_concurrent_streams_are_correct_and_actually_batched(model_dir, mode):
     plan = [(prompt_of(n, n), mt) for n, mt in [(3, 20), (9, 16), (14, 12), (5, 24), (20, 10), (7, 18),
                                                  (2, 22), (11, 14), (6, 20), (16, 8), (4, 26), (8, 12)]]
 
     async def scenario():
-        async with Server(model_dir, batch_size=4) as server:
+        async with Server(model_dir, batch_size=4, mode=mode) as server:
             results = await asyncio.gather(*(server.generate(p, mt) for p, mt in plan))
             health = await server.settle()
             metrics = await (await server.session.get(server.base + "/metrics")).text()
@@ -117,22 +118,29 @@ def test_concurrent_streams_are_correct_and_actually_batched(model_dir):
         assert status == 200
         done = terminal(events)
         assert done["type"] == "done" and done["execution_mode"] == "batch"
-        assert tokens_of(events) == reference(model_dir, prompt, max_tokens)
+        assert tokens_of(events) == reference(model_dir, prompt, max_tokens, mode)
     widths = [terminal(events)["max_decode_batch_width"] for _, events in results]
     assert max(widths) > 1, "requests must share decode steps, otherwise this is serial execution"
     assert health["kv_pool"]["kind"] == "fixed_slot_kv_pool_not_paged"
+    # Evidence must say which precision served the requests; a mislabeled run would corrupt a comparison.
+    if mode == "nf4":
+        assert health["quantization"]["format"] == "nf4" and health["quantization"]["quantized_linear_layers"] > 0
+    else:
+        assert health["quantization"] is None
+    assert health["weights_resident_bytes"] == health["kv_pool"]["weights_bytes"]
     assert health["execution_concurrency"] == 4 and health["kv_pool"]["capacity_rows"] == 4
     assert health["admission"]["reservations"] == 0
     assert "tensorpilot_kv_pool_rows_capacity 4.0" in metrics
     assert health["runtime_profile"]["decode_steps"] > 0 and health["runtime_profile"]["prefill_steps"] > 0
 
 
-def test_a_client_disconnect_mid_decode_frees_its_slot_and_spares_the_others(model_dir):
+@pytest.mark.parametrize("mode", ["none", "nf4"])
+def test_a_client_disconnect_mid_decode_frees_its_slot_and_spares_the_others(model_dir, mode):
     long = (prompt_of(6, 1), 60)
     others = [(prompt_of(5, 2), 14), (prompt_of(9, 3), 18)]
 
     async def scenario():
-        async with Server(model_dir, batch_size=4) as server:
+        async with Server(model_dir, batch_size=4, mode=mode) as server:
             dropped = asyncio.create_task(server.generate(*long, stop_after=4))
             rest = [asyncio.create_task(server.generate(p, mt)) for p, mt in others]
             await dropped
@@ -143,7 +151,7 @@ def test_a_client_disconnect_mid_decode_frees_its_slot_and_spares_the_others(mod
 
     results, health, outcomes = asyncio.run(scenario())
     for (prompt, max_tokens), (status, events) in zip(others, results):
-        assert tokens_of(events) == reference(model_dir, prompt, max_tokens)
+        assert tokens_of(events) == reference(model_dir, prompt, max_tokens, mode)
     assert health["admission"]["reservations"] == 0 and health["admission"]["estimated_kv_reserved_bytes"] == 0
     assert 'tensorpilot_jobs_total{outcome="cancelled"} 1.0' in outcomes
     assert health["kv_pool"]["sequences_removed"] >= 1
@@ -234,11 +242,12 @@ def test_authentication_still_protects_the_batch_worker(model_dir):
     assert asyncio.run(scenario()) == (401, "unauthorized")
 
 
-def test_sustained_churn_returns_the_pool_to_idle_without_reservation_leaks(model_dir):
+@pytest.mark.parametrize("mode", ["none", "nf4"])
+def test_sustained_churn_returns_the_pool_to_idle_without_reservation_leaks(model_dir, mode):
     rng = random.Random(11)
 
     async def scenario():
-        async with Server(model_dir, batch_size=4, queue_size=64) as server:
+        async with Server(model_dir, batch_size=4, queue_size=64, mode=mode) as server:
             jobs = []
             for i in range(40):
                 stop = 3 if i % 7 == 0 else None

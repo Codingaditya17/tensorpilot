@@ -25,6 +25,7 @@ import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import quantization as quant
 from .environment import dependency_versions, source_fingerprint
 from .gpu_telemetry import sample_gpus
 
@@ -57,6 +58,8 @@ CUDA_12_8_DRIVER = (570, 26)
 # Pins from requirements-cuda.in / requirements-cuda.txt. The preflight compares the
 # installed versions against these, so a drifted environment cannot pass silently.
 EXPECTED_PINS = {"torch": "2.9.1", "transformers": "5.20.1"}
+# Enforced only when quantization is requested, so a bf16/fp16 run does not depend on them.
+EXPECTED_QUANT_PINS = {"bitsandbytes": "0.50.2", "accelerate": "1.15.0"}
 # Headroom for activations, the caching allocator and a short KV cache.
 VRAM_HEADROOM_BYTES = int(1.5 * GIB)
 # Downloads need the weights once; the factor of two leaves room for the temporary copy.
@@ -99,10 +102,11 @@ def driver_check(telemetry):
                  driver_version=raw)
 
 
-def pins_check(installed=None):
+def pins_check(installed=None, quantization="none"):
     installed = installed or {}
     found = {}
-    for name, expected in EXPECTED_PINS.items():
+    pins = {**EXPECTED_PINS, **(EXPECTED_QUANT_PINS if quantization != "none" else {})}
+    for name, expected in pins.items():
         if name in installed:
             found[name] = installed[name]
             continue
@@ -111,12 +115,12 @@ def pins_check(installed=None):
         except importlib.metadata.PackageNotFoundError:
             found[name] = None
     mismatched = {name: {"expected": expected, "installed": found[name]}
-                  for name, expected in EXPECTED_PINS.items()
+                  for name, expected in pins.items()
                   if (found[name] or "").split("+")[0] != expected}
     if mismatched:
         return check("dependency_pins", False, f"installed versions differ from the lock: {mismatched}",
                      installed=found)
-    return check("dependency_pins", True, "torch and transformers match the locked versions", installed=found)
+    return check("dependency_pins", True, f"{' and '.join(sorted(pins))} match the locked versions", installed=found)
 
 
 def revision_check(revision):
@@ -166,18 +170,35 @@ def storage_check(cache_dir, weight_bytes):
                  free_bytes=free, required_bytes=required, cache_dir=str(target))
 
 
-def vram_check(torch_info, weight_bytes, min_vram_gib):
+def vram_check(torch_info, weight_bytes, min_vram_gib, *, resident_bytes=None):
+    """``weight_bytes`` is what is downloaded; ``resident_bytes`` (quantized loads) is what stays on the GPU."""
     devices = torch_info.get("devices") or []
     if not devices:
         return check("vram", False, "no CUDA device reported by PyTorch")
     device = devices[0]
-    required = max(weight_bytes + VRAM_HEADROOM_BYTES, min_vram_gib * GIB) if weight_bytes else min_vram_gib * GIB
+    held = resident_bytes or weight_bytes
+    required = max(held + VRAM_HEADROOM_BYTES, min_vram_gib * GIB) if held else min_vram_gib * GIB
     fits = device["free_bytes"] >= required and device["total_bytes"] >= required
+    basis = (f"estimated resident weights {held / GIB:.1f} GiB after quantization (download is "
+             f"{weight_bytes / GIB:.1f} GiB)" if resident_bytes else "weights")
     return check("vram", fits,
                  f"device {device['index']} has {device['free_bytes'] / GIB:.1f} GiB free of "
                  f"{device['total_bytes'] / GIB:.1f} GiB; need {required / GIB:.1f} GiB "
-                 f"(weights plus headroom, floor {min_vram_gib} GiB)",
-                 devices=devices, required_bytes=required)
+                 f"({basis} plus headroom, floor {min_vram_gib} GiB)",
+                 devices=devices, required_bytes=required, resident_bytes_estimate=resident_bytes)
+
+
+def fetch_hub_config(model, revision):
+    """The decoder config at a pinned revision. Only config.json is downloaded, never weights."""
+    from huggingface_hub import hf_hub_download
+    from transformers import AutoConfig
+    path = hf_hub_download(model, "config.json", revision=revision)
+    return AutoConfig.from_pretrained(path.rsplit("/", 1)[0])
+
+
+def local_config(path):
+    from transformers import AutoConfig
+    return AutoConfig.from_pretrained(str(path))
 
 
 def probe_torch():
@@ -206,7 +227,8 @@ def fetch_hub_info(model, revision):
 async def run_preflight(*, model, revision, min_vram_gib, prompt, smoke_tokens, load_backend,
                         cache_dir=None, sampler=sample_gpus, torch_probe=probe_torch,
                         fetch_info=fetch_hub_info, skip_remote=False, skip_load=False,
-                        installed_pins=None, local_model=False, traceback_file=None):
+                        installed_pins=None, local_model=False, traceback_file=None,
+                        quantization="none", config_loader=None):
     checks = []
     telemetry = await sampler()
     devices = telemetry.get("devices", [])
@@ -220,7 +242,13 @@ async def run_preflight(*, model, revision, min_vram_gib, prompt, smoke_tokens, 
                         "PyTorch CUDA is available" if cuda_ok else
                         f"PyTorch CUDA unavailable ({torch_info.get('error', 'cuda_available is false')})",
                         torch=torch_info))
-    checks.append(pins_check(installed_pins))
+    checks.append(pins_check(installed_pins, quantization))
+    if quantization != "none":
+        try:
+            quant.require_stack(quantization)
+            checks.append(check("quantization_stack", True, f"{quantization} stack (bitsandbytes, accelerate) is usable here"))
+        except quant.QuantizationUnavailable as error:
+            checks.append(check("quantization_stack", False, str(error)))
     checks.append(revision_check(revision))
     weight_bytes = None
     if local_model:
@@ -236,7 +264,14 @@ async def run_preflight(*, model, revision, min_vram_gib, prompt, smoke_tokens, 
         checks.append(remote)
     if weight_bytes:
         checks.append(storage_check(cache_dir, weight_bytes))
-    checks.append(vram_check(torch_info, weight_bytes, min_vram_gib))
+    resident = None
+    if quantization != "none" and weight_bytes:
+        try:
+            loader = config_loader or ((lambda name, rev: local_config(model)) if local_model else fetch_hub_config)
+            resident = quant.estimate_resident_bytes(await asyncio.to_thread(loader, model, revision), quantization)
+        except Exception as exc:  # Without a size estimate the fit cannot be judged; say so and fail.
+            checks.append(check("quantized_size", False, f"could not estimate quantized size: {type(exc).__name__}"))
+    checks.append(vram_check(torch_info, weight_bytes, min_vram_gib, resident_bytes=resident))
     smoke = None
     if skip_load:
         checks.append(check("model_smoke", False, "skipped by --skip-load; a smoke inference is required"))
@@ -292,7 +327,8 @@ def make_backend_loader(args):
         from .cuda_backend import CUDABackend
         return CUDABackend(args.model, revision=args.revision, offline=args.offline, device=args.device,
                            dtype=args.dtype, memory_fraction=args.cuda_memory_fraction,
-                           cache_dir=args.cache_dir, max_prompt_tokens=args.max_prompt_tokens)
+                           cache_dir=args.cache_dir, max_prompt_tokens=args.max_prompt_tokens,
+                           quantization=args.quantization)
     return load
 
 
@@ -304,6 +340,8 @@ def main():
     parser.add_argument("--cache-dir")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--dtype", choices=("float16", "bfloat16", "float32"), default="float16")
+    parser.add_argument("--quantization", choices=quant.MODES, default="none",
+                        help="check and load with this weight quantization; VRAM is judged on the quantized size")
     parser.add_argument("--cuda-memory-fraction", type=float, default=.9)
     parser.add_argument("--max-prompt-tokens", type=int, default=2048)
     parser.add_argument("--min-vram-gib", type=float, default=8,
@@ -326,7 +364,7 @@ def main():
         model=args.model, revision=args.revision, min_vram_gib=args.min_vram_gib,
         prompt=args.prompt, smoke_tokens=args.smoke_tokens, load_backend=make_backend_loader(args),
         cache_dir=args.cache_dir, skip_remote=args.skip_remote, skip_load=args.skip_load,
-        local_model=local_model, traceback_file=args.traceback_file))
+        local_model=local_model, traceback_file=args.traceback_file, quantization=args.quantization))
     report.update({"generated_at_utc": datetime.now(timezone.utc).isoformat(),
                    "host": {"platform": platform.platform(), "machine": platform.machine(),
                             "python": platform.python_version()},

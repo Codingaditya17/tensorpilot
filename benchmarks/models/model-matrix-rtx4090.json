@@ -1,0 +1,349 @@
+{
+  "schema": "tensorpilot.model-matrix/v1",
+  "estimate_kind": "derived_from_config_and_file_sizes_not_measured",
+  "gpu_total_bytes": 25252724736,
+  "memory_fraction": 0.9,
+  "headroom_bytes": 1610612736,
+  "models": [
+    {
+      "model": "Qwen/Qwen2.5-0.5B-Instruct",
+      "revision": "7ae557604adf67be50417f59c2c2f167def9a775",
+      "license": "apache-2.0",
+      "model_type": "qwen2",
+      "quantization": "none",
+      "download_gib": 0.92,
+      "weights_gib": 0.92,
+      "allocator_cap_gib": 21.17,
+      "context_length": 32768,
+      "dtype": "bfloat16",
+      "tokenizer_note": "byte-level BPE; the server tokenizes raw text with default special tokens and applies no chat template",
+      "layers": 24,
+      "q_heads": 14,
+      "kv_heads": 2,
+      "head_dim": 64,
+      "kv_bytes_per_token": 12288,
+      "kv_kib_per_token": 12.0,
+      "activation_estimate_mib_decode_batch": 39.8,
+      "activation_estimate_mib_prefill_chunk": 11.2,
+      "verdict": "fits",
+      "row_tokens": 1536,
+      "rows_granted": 64,
+      "rows_requested": 64,
+      "pool_gib": 1.14,
+      "pool_limited_by": "requested",
+      "kv_budget_gib": 18.75,
+      "max_concurrent_sequences_by_context": {
+        "512": {
+          "row_gib": 0.006,
+          "max_concurrent_sequences": 3198,
+          "holds_128_concurrent": true
+        },
+        "1024": {
+          "row_gib": 0.012,
+          "max_concurrent_sequences": 1598,
+          "holds_128_concurrent": true
+        },
+        "2048": {
+          "row_gib": 0.023,
+          "max_concurrent_sequences": 798,
+          "holds_128_concurrent": true
+        },
+        "4096": {
+          "row_gib": 0.047,
+          "max_concurrent_sequences": 398,
+          "holds_128_concurrent": true
+        },
+        "8192": {
+          "row_gib": 0.094,
+          "max_concurrent_sequences": 198,
+          "holds_128_concurrent": true
+        }
+      },
+      "gated": false
+    },
+    {
+      "model": "Qwen/Qwen2.5-0.5B-Instruct",
+      "revision": "7ae557604adf67be50417f59c2c2f167def9a775",
+      "license": "apache-2.0",
+      "model_type": "qwen2",
+      "quantization": "nf4",
+      "download_gib": 0.92,
+      "weights_gib": 0.43,
+      "allocator_cap_gib": 21.17,
+      "context_length": 32768,
+      "dtype": "bfloat16",
+      "tokenizer_note": "byte-level BPE; the server tokenizes raw text with default special tokens and applies no chat template",
+      "layers": 24,
+      "q_heads": 14,
+      "kv_heads": 2,
+      "head_dim": 64,
+      "kv_bytes_per_token": 12288,
+      "kv_kib_per_token": 12.0,
+      "dequant_scratch_gib": 0.02,
+      "activation_estimate_mib_decode_batch": 39.8,
+      "activation_estimate_mib_prefill_chunk": 11.2,
+      "verdict": "fits",
+      "row_tokens": 1536,
+      "rows_granted": 64,
+      "rows_requested": 64,
+      "pool_gib": 1.14,
+      "pool_limited_by": "requested",
+      "kv_budget_gib": 19.22,
+      "max_concurrent_sequences_by_context": {
+        "512": {
+          "row_gib": 0.006,
+          "max_concurrent_sequences": 3278,
+          "holds_128_concurrent": true
+        },
+        "1024": {
+          "row_gib": 0.012,
+          "max_concurrent_sequences": 1638,
+          "holds_128_concurrent": true
+        },
+        "2048": {
+          "row_gib": 0.023,
+          "max_concurrent_sequences": 818,
+          "holds_128_concurrent": true
+        },
+        "4096": {
+          "row_gib": 0.047,
+          "max_concurrent_sequences": 408,
+          "holds_128_concurrent": true
+        },
+        "8192": {
+          "row_gib": 0.094,
+          "max_concurrent_sequences": 203,
+          "holds_128_concurrent": true
+        }
+      },
+      "gated": false
+    },
+    {
+      "model": "Qwen/Qwen2.5-7B-Instruct",
+      "revision": "a09a35458c702b33eeacc393d103063234e8bc28",
+      "license": "apache-2.0",
+      "model_type": "qwen2",
+      "quantization": "none",
+      "download_gib": 14.19,
+      "weights_gib": 14.19,
+      "allocator_cap_gib": 21.17,
+      "context_length": 32768,
+      "dtype": "bfloat16",
+      "tokenizer_note": "byte-level BPE; the server tokenizes raw text with default special tokens and applies no chat template",
+      "layers": 28,
+      "q_heads": 28,
+      "kv_heads": 4,
+      "head_dim": 128,
+      "kv_bytes_per_token": 57344,
+      "kv_kib_per_token": 56.0,
+      "activation_estimate_mib_decode_batch": 47.6,
+      "activation_estimate_mib_prefill_chunk": 42.3,
+      "verdict": "fits",
+      "row_tokens": 1536,
+      "rows_granted": 64,
+      "rows_requested": 64,
+      "pool_gib": 5.33,
+      "pool_limited_by": "requested",
+      "kv_budget_gib": 5.48,
+      "max_concurrent_sequences_by_context": {
+        "512": {
+          "row_gib": 0.027,
+          "max_concurrent_sequences": 199,
+          "holds_128_concurrent": true
+        },
+        "1024": {
+          "row_gib": 0.055,
+          "max_concurrent_sequences": 99,
+          "holds_128_concurrent": false
+        },
+        "2048": {
+          "row_gib": 0.109,
+          "max_concurrent_sequences": 49,
+          "holds_128_concurrent": false
+        },
+        "4096": {
+          "row_gib": 0.219,
+          "max_concurrent_sequences": 24,
+          "holds_128_concurrent": false
+        },
+        "8192": {
+          "row_gib": 0.438,
+          "max_concurrent_sequences": 11,
+          "holds_128_concurrent": false
+        }
+      },
+      "gated": false
+    },
+    {
+      "model": "Qwen/Qwen2.5-7B-Instruct",
+      "revision": "a09a35458c702b33eeacc393d103063234e8bc28",
+      "license": "apache-2.0",
+      "model_type": "qwen2",
+      "quantization": "nf4",
+      "download_gib": 14.19,
+      "weights_gib": 5.17,
+      "allocator_cap_gib": 21.17,
+      "context_length": 32768,
+      "dtype": "bfloat16",
+      "tokenizer_note": "byte-level BPE; the server tokenizes raw text with default special tokens and applies no chat template",
+      "layers": 28,
+      "q_heads": 28,
+      "kv_heads": 4,
+      "head_dim": 128,
+      "kv_bytes_per_token": 57344,
+      "kv_kib_per_token": 56.0,
+      "dequant_scratch_gib": 0.38,
+      "activation_estimate_mib_decode_batch": 47.6,
+      "activation_estimate_mib_prefill_chunk": 42.3,
+      "verdict": "fits",
+      "row_tokens": 1536,
+      "rows_granted": 64,
+      "rows_requested": 64,
+      "pool_gib": 5.33,
+      "pool_limited_by": "requested",
+      "kv_budget_gib": 14.12,
+      "max_concurrent_sequences_by_context": {
+        "512": {
+          "row_gib": 0.027,
+          "max_concurrent_sequences": 515,
+          "holds_128_concurrent": true
+        },
+        "1024": {
+          "row_gib": 0.055,
+          "max_concurrent_sequences": 257,
+          "holds_128_concurrent": true
+        },
+        "2048": {
+          "row_gib": 0.109,
+          "max_concurrent_sequences": 128,
+          "holds_128_concurrent": true
+        },
+        "4096": {
+          "row_gib": 0.219,
+          "max_concurrent_sequences": 63,
+          "holds_128_concurrent": false
+        },
+        "8192": {
+          "row_gib": 0.438,
+          "max_concurrent_sequences": 31,
+          "holds_128_concurrent": false
+        }
+      },
+      "gated": false
+    },
+    {
+      "model": "Qwen/Qwen2.5-14B-Instruct",
+      "revision": "cf98f3b3bbb457ad9e2bb7baf9a0125b6b88caa8",
+      "license": "apache-2.0",
+      "model_type": "qwen2",
+      "quantization": "none",
+      "download_gib": 27.51,
+      "weights_gib": 27.51,
+      "allocator_cap_gib": 21.17,
+      "context_length": 32768,
+      "dtype": "bfloat16",
+      "tokenizer_note": "byte-level BPE; the server tokenizes raw text with default special tokens and applies no chat template",
+      "layers": 48,
+      "q_heads": 40,
+      "kv_heads": 8,
+      "head_dim": 128,
+      "kv_bytes_per_token": 196608,
+      "kv_kib_per_token": 192.0,
+      "activation_estimate_mib_decode_batch": 47.2,
+      "activation_estimate_mib_prefill_chunk": 40.8,
+      "verdict": "does_not_fit",
+      "reason": "no KV slot fits: weights 27.51 GiB, one row of 1536 tokens needs 0.281 GiB, KV budget is 0.00 GiB",
+      "note": "TensorPilot's only quantized mode is nf4; there is no offloading or tensor parallelism, so a model whose resident weights do not fit cannot be served on this GPU",
+      "gated": false
+    },
+    {
+      "model": "Qwen/Qwen2.5-14B-Instruct",
+      "revision": "cf98f3b3bbb457ad9e2bb7baf9a0125b6b88caa8",
+      "license": "apache-2.0",
+      "model_type": "qwen2",
+      "quantization": "nf4",
+      "download_gib": 27.51,
+      "weights_gib": 9.25,
+      "allocator_cap_gib": 21.17,
+      "context_length": 32768,
+      "dtype": "bfloat16",
+      "tokenizer_note": "byte-level BPE; the server tokenizes raw text with default special tokens and applies no chat template",
+      "layers": 48,
+      "q_heads": 40,
+      "kv_heads": 8,
+      "head_dim": 128,
+      "kv_bytes_per_token": 196608,
+      "kv_kib_per_token": 192.0,
+      "dequant_scratch_gib": 0.4,
+      "activation_estimate_mib_decode_batch": 47.2,
+      "activation_estimate_mib_prefill_chunk": 40.8,
+      "verdict": "fits",
+      "row_tokens": 1536,
+      "rows_granted": 34,
+      "rows_requested": 64,
+      "pool_gib": 9.84,
+      "pool_limited_by": "vram",
+      "kv_budget_gib": 10.02,
+      "max_concurrent_sequences_by_context": {
+        "512": {
+          "row_gib": 0.094,
+          "max_concurrent_sequences": 105,
+          "holds_128_concurrent": false
+        },
+        "1024": {
+          "row_gib": 0.188,
+          "max_concurrent_sequences": 52,
+          "holds_128_concurrent": false
+        },
+        "2048": {
+          "row_gib": 0.375,
+          "max_concurrent_sequences": 25,
+          "holds_128_concurrent": false
+        },
+        "4096": {
+          "row_gib": 0.75,
+          "max_concurrent_sequences": 12,
+          "holds_128_concurrent": false
+        },
+        "8192": {
+          "row_gib": 1.5,
+          "max_concurrent_sequences": 5,
+          "holds_128_concurrent": false
+        }
+      },
+      "gated": false
+    },
+    {
+      "model": "Qwen/Qwen3-8B",
+      "revision": "b968826d9c46dd6066d109eabc6255188de91218",
+      "license": "apache-2.0",
+      "model_type": "qwen3",
+      "quantization": "none",
+      "download_gib": 15.26,
+      "weights_gib": 15.26,
+      "allocator_cap_gib": 21.17,
+      "context_length": 40960,
+      "dtype": "bfloat16",
+      "tokenizer_note": "byte-level BPE; the server tokenizes raw text with default special tokens and applies no chat template",
+      "verdict": "unsupported_architecture",
+      "reason": "batched CUDA decoding supports ('qwen2', 'llama'); got 'qwen3'",
+      "gated": false
+    },
+    {
+      "model": "Qwen/Qwen3-8B",
+      "revision": "b968826d9c46dd6066d109eabc6255188de91218",
+      "license": "apache-2.0",
+      "model_type": "qwen3",
+      "quantization": "nf4",
+      "download_gib": 15.26,
+      "weights_gib": 5.66,
+      "allocator_cap_gib": 21.17,
+      "context_length": 40960,
+      "dtype": "bfloat16",
+      "tokenizer_note": "byte-level BPE; the server tokenizes raw text with default special tokens and applies no chat template",
+      "verdict": "unsupported_architecture",
+      "reason": "batched CUDA decoding supports ('qwen2', 'llama'); got 'qwen3'",
+      "gated": false
+    }
+  ]
+}

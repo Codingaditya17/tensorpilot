@@ -20,6 +20,7 @@ from aiohttp import web
 from prometheus_client import CONTENT_TYPE_LATEST
 
 from . import __version__
+from . import quantization
 from .backend import BACKENDS, MLXBackend
 from .bench import DEFAULT_MODEL
 from .engine import Engine, Overloaded
@@ -277,6 +278,10 @@ def main():
                         help="CUDA device, for example cuda or cuda:0")
     parser.add_argument("--dtype", choices=("float16", "bfloat16", "float32"), default="float16",
                         help="CUDA model weight dtype")
+    parser.add_argument("--quantization", choices=quantization.MODES,
+                        default=os.environ.get("TENSORPILOT_QUANTIZATION", "none"),
+                        help="CUDA weight quantization: none keeps --dtype weights; nf4 is bitsandbytes 4-bit NormalFloat "
+                             "with double quantization. Chosen explicitly; never an automatic fallback")
     parser.add_argument("--cuda-memory-fraction", type=float, default=.9,
                         help="per-process CUDA allocator cap in (0, 1]")
     parser.add_argument("--gpu-telemetry-interval", type=float, default=2.0,
@@ -322,6 +327,15 @@ def main():
             parser.error("--profile-memory is MLX-only")
         if not 0 < args.cuda_memory_fraction <= 1:
             parser.error("cuda-memory-fraction must be in (0, 1]")
+        if args.quantization != "none":
+            if args.dtype == "float32":
+                parser.error("--quantization nf4 computes in float16 or bfloat16; choose --dtype accordingly")
+            try:
+                quantization.require_stack(args.quantization)
+            except quantization.QuantizationUnavailable as error:
+                parser.error(str(error))
+    elif args.quantization != "none":
+        parser.error("--quantization is CUDA-only; the MLX backend loads its own pre-quantized models")
         if not math.isfinite(args.gpu_telemetry_interval) or args.gpu_telemetry_interval < 0:
             parser.error("gpu-telemetry-interval must be finite and nonnegative")
     api_key = os.environ.get("TENSORPILOT_API_KEY")
@@ -344,7 +358,8 @@ def main():
                               revision=args.revision, offline=args.offline,
                               profile_memory=args.profile_memory, cache_dir=args.cache_dir)
     else:
-        metadata = {"model": args.model, "backend": "cuda", "warmup": True, **common}
+        metadata = {"model": args.model, "backend": "cuda", "warmup": True, "quantization_mode": args.quantization,
+                    **common}
         if args.gpu_telemetry_interval > 0:
             telemetry = GPUTelemetry(args.gpu_telemetry_interval)
 
@@ -352,7 +367,7 @@ def main():
             return CUDABackend(args.model, max_prompt_tokens=args.max_prompt_tokens,
                                revision=args.revision, offline=args.offline, device=args.device,
                                dtype=args.dtype, memory_fraction=args.cuda_memory_fraction,
-                               cache_dir=args.cache_dir)
+                               cache_dir=args.cache_dir, quantization=args.quantization)
     adapter_factory = None
     if args.backend == "cuda" and args.execution == "batch":
         from .cuda_batch import CUDABatchAdapterFactory

@@ -11,7 +11,8 @@ import pytest
 torch = pytest.importorskip("torch")
 pytest.importorskip("transformers")
 
-from tiny_model import make_tiny_model_dir, make_tiny_qwen2_model  # noqa: E402
+from tiny_model import make_tiny_model_dir, make_tiny_qwen2_model, save_tiny_qwen2_model  # noqa: E402
+from tensorpilot import quantization as quant  # noqa: E402
 from tensorpilot.cuda_backend import CUDABackend  # noqa: E402
 from tensorpilot.cuda_batch import (CUDABatchAdapter, IncrementalDetokenizer, UnsupportedModel,  # noqa: E402
                                     plan_kv_pool, read_geometry)
@@ -25,10 +26,25 @@ def model_dir(tmp_path_factory):
     return make_tiny_model_dir(tmp_path_factory.mktemp("batch-model"))
 
 
-def make_backend(model_dir, architecture):
-    backend = CUDABackend(str(model_dir), device="cpu", allow_cpu=True, dtype="float32")
-    if architecture == "qwen2":
-        backend.model = make_tiny_qwen2_model()
+@pytest.fixture(scope="module")
+def qwen2_dir(tmp_path_factory):
+    return save_tiny_qwen2_model(tmp_path_factory.mktemp("batch-qwen2"))
+
+
+def make_backend(model_dir, architecture, qwen2_dir=None):
+    """architecture: llama | qwen2, optionally suffixed -nf4 for bitsandbytes NF4 weights (CPU, fp32 compute)."""
+    base, _, mode = architecture.partition("-")
+    mode = mode or "none"
+    backend = CUDABackend(str(model_dir), device="cpu", allow_cpu=True, dtype="float32", quantization=mode)
+    if base == "qwen2":
+        from transformers import AutoModelForCausalLM
+        if mode == "none":
+            backend.model = make_tiny_qwen2_model()
+        else:
+            backend.model = AutoModelForCausalLM.from_pretrained(
+                qwen2_dir, dtype=torch.float32, device_map={"": "cpu"},
+                quantization_config=quant.make_config(mode, torch.float32)).eval()
+        backend.weights_resident_bytes = quant.resident_weight_bytes(backend.model)
     return backend
 
 
@@ -75,6 +91,8 @@ def drive(adapter, plan, *, hook=None, limit=5000):
 
 
 def assert_matches_serial(backend, plan, results):
+    produced = {token for result in results.values() for token in result["ids"]}
+    assert len(produced) >= 3, "degenerate output would make this comparison vacuous"
     for index, (_, prompt, max_tokens) in enumerate(plan):
         expected = serial(backend, prompt, max_tokens)
         got = results[index]
@@ -83,9 +101,9 @@ def assert_matches_serial(backend, plan, results):
         assert got["text"] == expected["text"], f"request {index}"
 
 
-@pytest.fixture(params=["llama", "qwen2"])
-def backend(request, model_dir):
-    return make_backend(model_dir, request.param)
+@pytest.fixture(params=["llama", "qwen2", "llama-nf4", "qwen2-nf4"])
+def backend(request, model_dir, qwen2_dir):
+    return make_backend(model_dir, request.param, qwen2_dir)
 
 
 def test_batched_greedy_equals_serial_for_varied_prompt_and_output_lengths(backend):

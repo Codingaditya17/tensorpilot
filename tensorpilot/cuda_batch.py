@@ -190,17 +190,21 @@ class CUDABatchAdapter:
         self.backend = backend
         self.model = model
         self.device = backend.device
-        self.dtype = next(model.parameters()).dtype
+        # The backend's compute dtype, not the first parameter's: a quantized model's first weight is packed uint8.
+        self.dtype = getattr(backend, "compute_dtype", None) or next(model.parameters()).dtype
         self.prefill_step_size = prefill_step_size
         context = backend.context_tokens
         wanted = backend.max_prompt_tokens + 512
         self.row_tokens = min(row_tokens or wanted, context) if context else (row_tokens or wanted)
         dtype_bytes = torch.empty((), dtype=self.dtype).element_size()
         self.bytes_per_token = self.geometry.kv_bytes_per_token(dtype_bytes)
-        weights_bytes = sum(p.numel() * p.element_size() for p in model.parameters())
+        weights_bytes = getattr(backend, "weights_resident_bytes", None) or sum(
+            p.numel() * p.element_size() for p in model.parameters())
         total = None
         if self.device.type == "cuda":
             total = torch.cuda.get_device_properties(self.device).total_memory
+            # Anything the allocator already holds (quantization scratch included) counts against the pool.
+            weights_bytes = max(weights_bytes, torch.cuda.memory_allocated(self.device))
         fraction = backend.provenance.get("cuda_memory_fraction") or 0.9
         self.plan = plan_kv_pool(weights_bytes=weights_bytes, bytes_per_token=self.bytes_per_token,
                                  row_tokens=self.row_tokens, requested_capacity=capacity,

@@ -63,3 +63,23 @@ def test_non_loopback_bind_requires_an_api_key(monkeypatch, capsys):
 
 def test_default_model_remains_the_mlx_default():
     assert DEFAULT_MODEL.startswith("mlx-community/")
+
+
+def test_quantization_is_cuda_only_explicit_and_validated(monkeypatch, capsys):
+    assert "CUDA-only" in parse_error(monkeypatch, capsys, "--quantization", "nf4")
+    assert "--dtype" in parse_error(monkeypatch, capsys, "--backend", "cuda", "--model", "org/model",
+                                    "--quantization", "nf4", "--dtype", "float32")
+    assert "invalid choice" in parse_error(monkeypatch, capsys, "--backend", "cuda", "--model", "org/model",
+                                           "--quantization", "int4")
+
+
+def test_a_missing_quantization_stack_stops_the_worker_before_any_model_is_loaded(monkeypatch, capsys):
+    from tensorpilot import quantization
+
+    def refuse(mode):
+        raise quantization.QuantizationUnavailable("bitsandbytes is not installed; no fallback to bf16")
+
+    monkeypatch.setattr(quantization, "require_stack", refuse)
+    message = parse_error(monkeypatch, capsys, "--backend", "cuda", "--model", "org/model",
+                          "--quantization", "nf4", "--dtype", "bfloat16")
+    assert "no fallback" in message

@@ -6,3 +6,5 @@ tokenizers
 huggingface-hub
 aiohttp>=3.12,<4
 prometheus-client>=0.21,<1
+bitsandbytes==0.50.2
+accelerate==1.15.0
