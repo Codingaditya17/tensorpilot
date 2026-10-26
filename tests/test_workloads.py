@@ -84,3 +84,16 @@ def test_validation_accepts_optional_fields_and_rejects_bad_ones():
                 {"surprise": 1}, {"prompt_tokens": 1.5}):
         with pytest.raises(ValueError):
             validate_workload([{**base, **bad}])
+
+
+def test_a_prompt_longer_than_the_service_accepts_is_an_error_not_a_silent_clamp():
+    too_long = {"classes": [{"name": "huge", "prompt_tokens": MAX_PROMPT_TOKENS + 1, "output_tokens": 8}]}
+    with pytest.raises(ValueError, match="2700 at most"):
+        build_spec_workload(too_long, 3)
+    unbounded = {"seed": 1, "classes": [{"name": "tail", "prompt_tokens": {"dist": "lognormal", "median": 2000,
+                                                                           "sigma": 1.5}, "output_tokens": 8}]}
+    with pytest.raises(ValueError, match="at most"):
+        build_spec_workload(unbounded, 200)
+    exact = build_spec_workload({"classes": [{"name": "edge", "prompt_tokens": MAX_PROMPT_TOKENS,
+                                              "output_tokens": 8}]}, 2)
+    assert [item["prompt_tokens"] for item in exact] == [MAX_PROMPT_TOKENS] * 2

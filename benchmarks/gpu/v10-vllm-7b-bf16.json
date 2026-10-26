@@ -1,0 +1,600 @@
+{
+  "schema": "tensorpilot.gpu-experiments/v1",
+  "suite": "v1.0-vllm-7b-bf16",
+  "target": {
+    "model": "Qwen/Qwen2.5-7B-Instruct",
+    "revision": "a09a35458c702b33eeacc393d103063234e8bc28",
+    "license": "Apache-2.0",
+    "prompt_format": "raw text, tokenizer default special tokens (no chat template)",
+    "engine": "vllm",
+    "execution": "batch",
+    "quantization": "none",
+    "dtype": "bfloat16",
+    "max_prompt_tokens": 1024,
+    "quantization_note": null
+  },
+  "assumptions": {
+    "status": "placeholder_unmeasured",
+    "decode_tokens_per_s": 40,
+    "prefill_tokens_per_s": 2000,
+    "single_stream_source": "ASSUMPTION: bf16 weight reads bound decode near 45 tok/s",
+    "batching_efficiency_exponent": 0.8,
+    "note": "planning numbers only; the experiment caps, not these estimates, bound cost"
+  },
+  "session_overhead_minutes": 5,
+  "max_session_minutes": 120,
+  "expected_experiment_minutes": 36.8,
+  "telemetry": {
+    "interval_s": 1.0
+  },
+  "experiments": [
+    {
+      "id": "cold-start",
+      "kind": "closed_loop",
+      "description": "the first requests after readiness, before any warmup request: cold-start latency",
+      "requests": 8,
+      "concurrency": 1,
+      "repeats": 1,
+      "warmup_requests": 0,
+      "timeout_s": 120,
+      "workload_spec": {
+        "seed": 11,
+        "classes": [
+          {
+            "name": "short",
+            "prompt_tokens": {
+              "dist": "uniform",
+              "min": 16,
+              "max": 64
+            },
+            "output_tokens": {
+              "dist": "uniform",
+              "min": 16,
+              "max": 64
+            },
+            "weight": 1
+          }
+        ]
+      },
+      "estimated_minutes": 0.6,
+      "max_minutes": 5,
+      "abort_error_rate": 0.5
+    },
+    {
+      "id": "sweep-c1",
+      "kind": "closed_loop",
+      "description": "1 concurrent clients, mixed prompt and output lengths, closed loop",
+      "requests": 60,
+      "concurrency": 1,
+      "repeats": 3,
+      "warmup_requests": 4,
+      "timeout_s": 120,
+      "workload_spec": {
+        "seed": 12,
+        "classes": [
+          {
+            "name": "short",
+            "prompt_tokens": {
+              "dist": "uniform",
+              "min": 16,
+              "max": 64
+            },
+            "output_tokens": {
+              "dist": "uniform",
+              "min": 16,
+              "max": 64
+            },
+            "weight": 6
+          },
+          {
+            "name": "medium",
+            "prompt_tokens": {
+              "dist": "uniform",
+              "min": 128,
+              "max": 384
+            },
+            "output_tokens": {
+              "dist": "uniform",
+              "min": 64,
+              "max": 192
+            },
+            "weight": 3
+          },
+          {
+            "name": "long",
+            "prompt_tokens": {
+              "dist": "uniform",
+              "min": 512,
+              "max": 896
+            },
+            "output_tokens": {
+              "dist": "uniform",
+              "min": 128,
+              "max": 320
+            },
+            "weight": 1
+          }
+        ]
+      },
+      "estimated_minutes": 7.3,
+      "max_minutes": 21,
+      "abort_error_rate": 0.5,
+      "slo": {
+        "ttft_s": 2.0,
+        "e2e_s": 20.0,
+        "tpot_s": 0.15
+      }
+    },
+    {
+      "id": "sweep-c8",
+      "kind": "closed_loop",
+      "description": "8 concurrent clients, mixed prompt and output lengths, closed loop",
+      "requests": 240,
+      "concurrency": 8,
+      "repeats": 3,
+      "warmup_requests": 4,
+      "timeout_s": 120,
+      "workload_spec": {
+        "seed": 12,
+        "classes": [
+          {
+            "name": "short",
+            "prompt_tokens": {
+              "dist": "uniform",
+              "min": 16,
+              "max": 64
+            },
+            "output_tokens": {
+              "dist": "uniform",
+              "min": 16,
+              "max": 64
+            },
+            "weight": 6
+          },
+          {
+            "name": "medium",
+            "prompt_tokens": {
+              "dist": "uniform",
+              "min": 128,
+              "max": 384
+            },
+            "output_tokens": {
+              "dist": "uniform",
+              "min": 64,
+              "max": 192
+            },
+            "weight": 3
+          },
+          {
+            "name": "long",
+            "prompt_tokens": {
+              "dist": "uniform",
+              "min": 512,
+              "max": 896
+            },
+            "output_tokens": {
+              "dist": "uniform",
+              "min": 128,
+              "max": 320
+            },
+            "weight": 1
+          }
+        ]
+      },
+      "estimated_minutes": 5.7,
+      "max_minutes": 17,
+      "abort_error_rate": 0.5,
+      "slo": {
+        "ttft_s": 2.0,
+        "e2e_s": 20.0,
+        "tpot_s": 0.15
+      }
+    },
+    {
+      "id": "sweep-c16",
+      "kind": "closed_loop",
+      "description": "16 concurrent clients, mixed prompt and output lengths, closed loop",
+      "requests": 320,
+      "concurrency": 16,
+      "repeats": 3,
+      "warmup_requests": 4,
+      "timeout_s": 120,
+      "workload_spec": {
+        "seed": 12,
+        "classes": [
+          {
+            "name": "short",
+            "prompt_tokens": {
+              "dist": "uniform",
+              "min": 16,
+              "max": 64
+            },
+            "output_tokens": {
+              "dist": "uniform",
+              "min": 16,
+              "max": 64
+            },
+            "weight": 6
+          },
+          {
+            "name": "medium",
+            "prompt_tokens": {
+              "dist": "uniform",
+              "min": 128,
+              "max": 384
+            },
+            "output_tokens": {
+              "dist": "uniform",
+              "min": 64,
+              "max": 192
+            },
+            "weight": 3
+          },
+          {
+            "name": "long",
+            "prompt_tokens": {
+              "dist": "uniform",
+              "min": 512,
+              "max": 896
+            },
+            "output_tokens": {
+              "dist": "uniform",
+              "min": 128,
+              "max": 320
+            },
+            "weight": 1
+          }
+        ]
+      },
+      "estimated_minutes": 4.5,
+      "max_minutes": 14,
+      "abort_error_rate": 0.5,
+      "slo": {
+        "ttft_s": 2.0,
+        "e2e_s": 20.0,
+        "tpot_s": 0.15
+      }
+    },
+    {
+      "id": "sweep-c32",
+      "kind": "closed_loop",
+      "description": "32 concurrent clients, mixed prompt and output lengths, closed loop",
+      "requests": 480,
+      "concurrency": 32,
+      "repeats": 3,
+      "warmup_requests": 4,
+      "timeout_s": 120,
+      "workload_spec": {
+        "seed": 12,
+        "classes": [
+          {
+            "name": "short",
+            "prompt_tokens": {
+              "dist": "uniform",
+              "min": 16,
+              "max": 64
+            },
+            "output_tokens": {
+              "dist": "uniform",
+              "min": 16,
+              "max": 64
+            },
+            "weight": 6
+          },
+          {
+            "name": "medium",
+            "prompt_tokens": {
+              "dist": "uniform",
+              "min": 128,
+              "max": 384
+            },
+            "output_tokens": {
+              "dist": "uniform",
+              "min": 64,
+              "max": 192
+            },
+            "weight": 3
+          },
+          {
+            "name": "long",
+            "prompt_tokens": {
+              "dist": "uniform",
+              "min": 512,
+              "max": 896
+            },
+            "output_tokens": {
+              "dist": "uniform",
+              "min": 128,
+              "max": 320
+            },
+            "weight": 1
+          }
+        ]
+      },
+      "estimated_minutes": 4.0,
+      "max_minutes": 12,
+      "abort_error_rate": 0.5,
+      "slo": {
+        "ttft_s": 2.0,
+        "e2e_s": 20.0,
+        "tpot_s": 0.15
+      }
+    },
+    {
+      "id": "sweep-c64",
+      "kind": "closed_loop",
+      "description": "64 concurrent clients, mixed prompt and output lengths, closed loop",
+      "requests": 640,
+      "concurrency": 64,
+      "repeats": 2,
+      "warmup_requests": 4,
+      "timeout_s": 120,
+      "workload_spec": {
+        "seed": 12,
+        "classes": [
+          {
+            "name": "short",
+            "prompt_tokens": {
+              "dist": "uniform",
+              "min": 16,
+              "max": 64
+            },
+            "output_tokens": {
+              "dist": "uniform",
+              "min": 16,
+              "max": 64
+            },
+            "weight": 6
+          },
+          {
+            "name": "medium",
+            "prompt_tokens": {
+              "dist": "uniform",
+              "min": 128,
+              "max": 384
+            },
+            "output_tokens": {
+              "dist": "uniform",
+              "min": 64,
+              "max": 192
+            },
+            "weight": 3
+          },
+          {
+            "name": "long",
+            "prompt_tokens": {
+              "dist": "uniform",
+              "min": 512,
+              "max": 896
+            },
+            "output_tokens": {
+              "dist": "uniform",
+              "min": 128,
+              "max": 320
+            },
+            "weight": 1
+          }
+        ]
+      },
+      "estimated_minutes": 2.4,
+      "max_minutes": 8,
+      "abort_error_rate": 0.5,
+      "slo": {
+        "ttft_s": 2.0,
+        "e2e_s": 20.0,
+        "tpot_s": 0.15
+      }
+    },
+    {
+      "id": "sweep-c128",
+      "kind": "closed_loop",
+      "description": "128 concurrent clients, mixed prompt and output lengths, closed loop",
+      "requests": 768,
+      "concurrency": 128,
+      "repeats": 2,
+      "warmup_requests": 4,
+      "timeout_s": 120,
+      "workload_spec": {
+        "seed": 12,
+        "classes": [
+          {
+            "name": "short",
+            "prompt_tokens": {
+              "dist": "uniform",
+              "min": 16,
+              "max": 64
+            },
+            "output_tokens": {
+              "dist": "uniform",
+              "min": 16,
+              "max": 64
+            },
+            "weight": 6
+          },
+          {
+            "name": "medium",
+            "prompt_tokens": {
+              "dist": "uniform",
+              "min": 128,
+              "max": 384
+            },
+            "output_tokens": {
+              "dist": "uniform",
+              "min": 64,
+              "max": 192
+            },
+            "weight": 3
+          },
+          {
+            "name": "long",
+            "prompt_tokens": {
+              "dist": "uniform",
+              "min": 512,
+              "max": 896
+            },
+            "output_tokens": {
+              "dist": "uniform",
+              "min": 128,
+              "max": 320
+            },
+            "weight": 1
+          }
+        ]
+      },
+      "estimated_minutes": 2.7,
+      "max_minutes": 9,
+      "abort_error_rate": 0.5,
+      "slo": {
+        "ttft_s": 2.0,
+        "e2e_s": 20.0,
+        "tpot_s": 0.15
+      }
+    },
+    {
+      "id": "ladder-poisson",
+      "kind": "open_loop",
+      "description": "Poisson arrivals at rising rates; aborts when more than 20% of requests fail",
+      "requests": 120,
+      "concurrency": 256,
+      "rates": [
+        0.5,
+        1,
+        2,
+        4,
+        8,
+        16
+      ],
+      "arrival": "poisson",
+      "repeats": 1,
+      "warmup_requests": 4,
+      "timeout_s": 120,
+      "workload_spec": {
+        "seed": 12,
+        "classes": [
+          {
+            "name": "short",
+            "prompt_tokens": {
+              "dist": "uniform",
+              "min": 16,
+              "max": 64
+            },
+            "output_tokens": {
+              "dist": "uniform",
+              "min": 16,
+              "max": 64
+            },
+            "weight": 6
+          },
+          {
+            "name": "medium",
+            "prompt_tokens": {
+              "dist": "uniform",
+              "min": 128,
+              "max": 384
+            },
+            "output_tokens": {
+              "dist": "uniform",
+              "min": 64,
+              "max": 192
+            },
+            "weight": 3
+          },
+          {
+            "name": "long",
+            "prompt_tokens": {
+              "dist": "uniform",
+              "min": 512,
+              "max": 896
+            },
+            "output_tokens": {
+              "dist": "uniform",
+              "min": 128,
+              "max": 320
+            },
+            "weight": 1
+          }
+        ]
+      },
+      "estimated_minutes": 8.6,
+      "max_minutes": 24,
+      "abort_error_rate": 0.2,
+      "slo": {
+        "ttft_s": 2.0,
+        "e2e_s": 20.0,
+        "tpot_s": 0.15
+      }
+    },
+    {
+      "id": "bursty",
+      "kind": "open_loop",
+      "description": "bursts of eight arrivals at a fixed mean rate",
+      "requests": 160,
+      "concurrency": 256,
+      "rates": [
+        8
+      ],
+      "arrival": "burst",
+      "repeats": 1,
+      "warmup_requests": 4,
+      "timeout_s": 120,
+      "workload_spec": {
+        "seed": 12,
+        "classes": [
+          {
+            "name": "short",
+            "prompt_tokens": {
+              "dist": "uniform",
+              "min": 16,
+              "max": 64
+            },
+            "output_tokens": {
+              "dist": "uniform",
+              "min": 16,
+              "max": 64
+            },
+            "weight": 6
+          },
+          {
+            "name": "medium",
+            "prompt_tokens": {
+              "dist": "uniform",
+              "min": 128,
+              "max": 384
+            },
+            "output_tokens": {
+              "dist": "uniform",
+              "min": 64,
+              "max": 192
+            },
+            "weight": 3
+          },
+          {
+            "name": "long",
+            "prompt_tokens": {
+              "dist": "uniform",
+              "min": 512,
+              "max": 896
+            },
+            "output_tokens": {
+              "dist": "uniform",
+              "min": 128,
+              "max": 320
+            },
+            "weight": 1
+          }
+        ]
+      },
+      "estimated_minutes": 1.0,
+      "max_minutes": 5,
+      "abort_error_rate": 0.5,
+      "burst_size": 8,
+      "slo": {
+        "ttft_s": 2.0,
+        "e2e_s": 20.0,
+        "tpot_s": 0.15
+      }
+    }
+  ],
+  "api": "openai",
+  "model_name": "Qwen/Qwen2.5-7B-Instruct"
+}

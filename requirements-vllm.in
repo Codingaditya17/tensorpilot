@@ -1,0 +1,7 @@
+# vLLM comparison environment. It is installed into its own virtualenv on the Pod and never into the system Python:
+# vLLM 0.31.0 pins torch 2.13.0 with the CUDA 13.0 runtime and transformers<5.18, while TensorPilot pins torch
+# 2.9.1 (CUDA 12.8) and transformers 5.20.1. The CUDA 13.0 runtime needs a Linux driver of 580 or newer.
+# Regenerate requirements-vllm.txt with:
+#   uv pip compile requirements-vllm.in --python-platform x86_64-unknown-linux-gnu --python-version 3.11 --generate-hashes -o requirements-vllm.txt
+vllm==0.31.0
+bitsandbytes==0.50.2

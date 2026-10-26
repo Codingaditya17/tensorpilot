@@ -126,7 +126,11 @@ def build_spec_workload(spec, requests):
     plan = []
     for _ in range(requests):
         entry = rng.choices(classes, weights=weights)[0]
-        prompt_tokens = max(1, min(sample(entry["prompt_tokens"], rng), MAX_PROMPT_TOKENS))
+        prompt_tokens = max(1, sample(entry["prompt_tokens"], rng))
+        if prompt_tokens > MAX_PROMPT_TOKENS:
+            # Never clamp silently: a plan that claims longer prompts than it contains would misreport its own evidence.
+            raise ValueError(f"class {entry['name']!r} asks for a {prompt_tokens}-token prompt; the service accepts "
+                             f"{MAX_PROMPT_TOKENS} at most (its 16384-byte prompt limit)")
         item = {"prompt": prompt_of_tokens(prompt_tokens, rng),
                 "max_tokens": max(1, min(sample(entry["output_tokens"], rng), 512)),
                 "class": entry["name"], "prompt_tokens": prompt_tokens}

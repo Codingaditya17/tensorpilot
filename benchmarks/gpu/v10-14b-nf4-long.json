@@ -1,0 +1,177 @@
+{
+  "schema": "tensorpilot.gpu-experiments/v1",
+  "suite": "v1.0-14b-nf4-long",
+  "target": {
+    "model": "Qwen/Qwen2.5-14B-Instruct",
+    "revision": "cf98f3b3bbb457ad9e2bb7baf9a0125b6b88caa8",
+    "license": "Apache-2.0",
+    "prompt_format": "raw text, tokenizer default special tokens (no chat template)",
+    "engine": "tensorpilot",
+    "execution": "batch",
+    "quantization": "nf4",
+    "dtype": "bfloat16",
+    "max_prompt_tokens": 2048
+  },
+  "assumptions": {
+    "status": "placeholder_unmeasured",
+    "decode_tokens_per_s": 25,
+    "prefill_tokens_per_s": 2000,
+    "single_stream_source": "ASSUMPTION: NF4 dequantization overhead, unmeasured",
+    "batching_efficiency_exponent": 0.8,
+    "note": "planning numbers only; the experiment caps, not these estimates, bound cost"
+  },
+  "session_overhead_minutes": 5,
+  "max_session_minutes": 52,
+  "expected_experiment_minutes": 14.4,
+  "telemetry": {
+    "interval_s": 1.0
+  },
+  "experiments": [
+    {
+      "id": "cold-start",
+      "kind": "closed_loop",
+      "description": "the first requests after readiness, before any warmup request: cold-start latency",
+      "requests": 8,
+      "concurrency": 1,
+      "repeats": 1,
+      "warmup_requests": 0,
+      "timeout_s": 120,
+      "workload_spec": {
+        "seed": 11,
+        "classes": [
+          {
+            "name": "short",
+            "prompt_tokens": {
+              "dist": "uniform",
+              "min": 16,
+              "max": 64
+            },
+            "output_tokens": {
+              "dist": "uniform",
+              "min": 16,
+              "max": 64
+            },
+            "weight": 1
+          }
+        ]
+      },
+      "estimated_minutes": 0.7,
+      "max_minutes": 5,
+      "abort_error_rate": 0.5
+    },
+    {
+      "id": "long-c1",
+      "kind": "closed_loop",
+      "description": "1 clients with 1024-2048 token prompts",
+      "requests": 24,
+      "concurrency": 1,
+      "repeats": 2,
+      "warmup_requests": 2,
+      "timeout_s": 120,
+      "workload_spec": {
+        "seed": 15,
+        "classes": [
+          {
+            "name": "context",
+            "prompt_tokens": {
+              "dist": "choice",
+              "values": [
+                1024,
+                2048
+              ]
+            },
+            "output_tokens": {
+              "dist": "uniform",
+              "min": 128,
+              "max": 256
+            }
+          }
+        ]
+      },
+      "estimated_minutes": 6.7,
+      "max_minutes": 19,
+      "abort_error_rate": 0.5,
+      "slo": {
+        "ttft_s": 4.0,
+        "e2e_s": 40.0,
+        "tpot_s": 0.35
+      }
+    },
+    {
+      "id": "long-c4",
+      "kind": "closed_loop",
+      "description": "4 clients with 1024-2048 token prompts",
+      "requests": 32,
+      "concurrency": 4,
+      "repeats": 2,
+      "warmup_requests": 2,
+      "timeout_s": 120,
+      "workload_spec": {
+        "seed": 15,
+        "classes": [
+          {
+            "name": "context",
+            "prompt_tokens": {
+              "dist": "choice",
+              "values": [
+                1024,
+                2048
+              ]
+            },
+            "output_tokens": {
+              "dist": "uniform",
+              "min": 128,
+              "max": 256
+            }
+          }
+        ]
+      },
+      "estimated_minutes": 3.3,
+      "max_minutes": 11,
+      "abort_error_rate": 0.5,
+      "slo": {
+        "ttft_s": 4.0,
+        "e2e_s": 40.0,
+        "tpot_s": 0.35
+      }
+    },
+    {
+      "id": "long-c8",
+      "kind": "closed_loop",
+      "description": "8 clients with 1024-2048 token prompts",
+      "requests": 64,
+      "concurrency": 8,
+      "repeats": 2,
+      "warmup_requests": 2,
+      "timeout_s": 120,
+      "workload_spec": {
+        "seed": 15,
+        "classes": [
+          {
+            "name": "context",
+            "prompt_tokens": {
+              "dist": "choice",
+              "values": [
+                1024,
+                2048
+              ]
+            },
+            "output_tokens": {
+              "dist": "uniform",
+              "min": 128,
+              "max": 256
+            }
+          }
+        ]
+      },
+      "estimated_minutes": 3.7,
+      "max_minutes": 12,
+      "abort_error_rate": 0.5,
+      "slo": {
+        "ttft_s": 4.0,
+        "e2e_s": 40.0,
+        "tpot_s": 0.35
+      }
+    }
+  ]
+}

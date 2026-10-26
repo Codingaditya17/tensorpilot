@@ -179,8 +179,8 @@ def _validate_experiment(experiment):
     if kind == "open_loop" or kind == "saturation":
         rates = experiment.get("rates")
         if not isinstance(rates, list) or not rates or len(rates) > 8 or not all(
-                _positive_number(rate) and rate <= 50 for rate in rates):
-            raise ValueError(f"{identifier}: rates must be 1..8 positive numbers up to 50 per second")
+                _positive_number(rate) and rate <= 1000 for rate in rates):
+            raise ValueError(f"{identifier}: rates must be 1..8 positive numbers up to 1000 per second")
     elif "rates" in experiment:
         raise ValueError(f"{identifier}: rates is only valid for open_loop and saturation")
 
