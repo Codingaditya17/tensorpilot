@@ -6,6 +6,9 @@ M5 MacBook Pro. **No NVIDIA GPU has run this code yet.** Performance is not clai
 anywhere in this release. The measured CUDA results come from the GPU session in
 [`v09-runpod-runbook.md`](v09-runpod-runbook.md).
 
+
+> **Superseded in part by v1.0 (not yet GPU-verified):** the CUDA backend is no longer serial-only; see [v10-architecture.md](v10-architecture.md). The limitations below describe v0.9.
+
 ## Goal and non-goals
 
 Goal: a TensorPilot worker that loads a real open-weight Transformers checkpoint on

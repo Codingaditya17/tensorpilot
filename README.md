@@ -32,6 +32,19 @@ multiple independent sequences through that thread.
 - Constant-size cluster health, revision-safe worker pagination, bounded heartbeat
   concurrency and GPU-free real-network fault/saturation experiments.
 
+## v1.0 GPU scale evaluation (implemented, **not yet run on a GPU**)
+
+- **CUDA continuous batching:** a batched forward pass over a fixed KV slot pool for Qwen2 and Llama models, behind the existing batch engine
+  (`--backend cuda --execution batch`). Not paged, no prefix cache, no CUDA graphs. The serial worker remains for A/B tests.
+- **Explicit NF4 quantization** (`--quantization nf4`, bitsandbytes) so Qwen2.5-14B can be planned for a 24 GB card. It never falls back to another
+  precision. Lower memory does not imply higher speed, and 14B still cannot hold 128 concurrent sequences at any tested context length.
+- **Evaluation harness:** seeded workloads, Poisson and bursty arrivals, cancellation, timeouts, SLO goodput, continuous GPU and server telemetry,
+  a batch-invariance check, a worker-crash audit, a vLLM comparison client and a hash-locked vLLM environment, a budget-ledgered stage runner, and a
+  report generator that invents nothing.
+- Verified on CPU and inside the Linux image; **nothing has run on a GPU**, so there are no v1.0 performance numbers. The only GPU evidence is the
+  immutable v0.9.1-4 baseline (`benchmarks/baselines/`). Start with [`docs/v10-evaluation-plan.md`](docs/v10-evaluation-plan.md); the design is in
+  [`docs/v10-architecture.md`](docs/v10-architecture.md) and the Pod procedure in [`docs/v10-runbook.md`](docs/v10-runbook.md).
+
 Real MLX inference and CPU behavior tests are separate evidence. A scheduling
 policy is experimental until measured against a baseline; improvements to one
 latency percentile can worsen another. FIFO remains the default.

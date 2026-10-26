@@ -34,7 +34,9 @@ def free_port():
 def run(args, tmp_path, *, env=None, timeout=240):
     environment = {**os.environ, "TENSORPILOT_V10_SESSION": str(tmp_path / "session"),
                    "TENSORPILOT_CACHE_DIR": str(tmp_path / "cache"), "PYTHONDONTWRITEBYTECODE": "1"}
-    for name in ("TENSORPILOT_API_KEY", "SESSION_BUDGET_MINUTES", "V10_TEST_MODE", "PRICE_PER_HOUR_USD"):
+    # The experiment image sets TENSORPILOT_POD_MAX_MINUTES; only the lifetime tests should see it.
+    for name in ("TENSORPILOT_API_KEY", "SESSION_BUDGET_MINUTES", "V10_TEST_MODE", "PRICE_PER_HOUR_USD",
+                 "TENSORPILOT_POD_MAX_MINUTES"):
         environment.pop(name, None)
     environment.update(env or {})
     return subprocess.run(["bash", str(SCRIPT), *args], env=environment, capture_output=True, text=True,
@@ -251,3 +253,29 @@ def test_a_crash_stage_kills_the_worker_and_audits_the_journal(tmp_path):
     assert KEY not in (directory / "fault" / "fault-report.json").read_text()
     assert not stub_alive()
 
+
+
+def lifetime_check(life, budget):
+    environment = {**os.environ, "SESSION_BUDGET_MINUTES": str(budget)}
+    environment.pop("TENSORPILOT_POD_MAX_MINUTES", None)
+    if life is not None:
+        environment["TENSORPILOT_POD_MAX_MINUTES"] = str(life)
+    return subprocess.run(["bash", "-c", f'source "{SCRIPT}"; pod_lifetime_check'], env=environment,
+                          capture_output=True, text=True)
+
+
+def test_a_pod_whose_lifetime_backstop_would_end_the_session_early_is_refused():
+    short = lifetime_check(120, 360)
+    assert short.returncode == 1 and "container would exit mid-stage" in short.stderr and "at least 420" in short.stderr
+    assert lifetime_check(419, 360).returncode == 1
+    assert lifetime_check(420, 360).returncode == 0
+    assert lifetime_check(None, 360).returncode == 0, "outside the experiment image there is no backstop to check"
+
+
+def test_the_lifetime_guard_stops_a_run_and_a_plan_before_any_work(tmp_path):
+    env = {"TENSORPILOT_POD_MAX_MINUTES": "120", "SESSION_BUDGET_MINUTES": "360", "TENSORPILOT_API_KEY": KEY,
+           "V10_TEST_MODE": "1", "V10_SKIP_GPU_CHECKS": "1"}
+    run_result = run(["0.5b-serial"], tmp_path, env=env)
+    assert run_result.returncode == 3 and "backstop" in run_result.stderr and not stage_dirs(tmp_path)
+    plan = run(["--plan", "0.5b-serial"], tmp_path, env=env)
+    assert plan.returncode == 3 and "backstop" in plan.stderr

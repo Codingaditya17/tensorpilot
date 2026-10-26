@@ -117,6 +117,23 @@ gpu_checks() {  # stage_engine
   fi
 }
 
+# The experiment image exits its container when TENSORPILOT_POD_MAX_MINUTES elapses (a billing backstop). A session longer than
+# that would be killed mid-stage, so refuse to start unless the Pod will outlive the budget by an hour. Outside the experiment
+# image the variable is unset and there is nothing to check.
+pod_lifetime_check() {
+  local life="${TENSORPILOT_POD_MAX_MINUTES:-}"
+  [[ -z "$life" ]] && return 0
+  python3 - "$life" "$SESSION_BUDGET_MINUTES" <<'PY'
+import sys
+life, budget = map(float, sys.argv[1:3])
+if life < budget + 60:
+    print(f"refused: this Pod's lifetime backstop is {life:.0f} minutes (TENSORPILOT_POD_MAX_MINUTES) but the session budget is "
+          f"{budget:.0f} minutes. The container would exit mid-stage. Set the backstop to at least {budget + 60:.0f} in the Pod "
+          "template, or lower SESSION_BUDGET_MINUTES.", file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
 check_disk() {
   local cache="$1" need_gib="$2" free_kib free_gib
   mkdir -p "$cache"
@@ -337,6 +354,7 @@ if used + cap > budget:
     sys.exit(1)
 PY
   gpu_checks "$V10_ENGINE"
+  pod_lifetime_check || exit 3
   skip_gpu || check_disk "$CACHE" "$V10_DOWNLOAD_GIB"
   STAGE_DIR="$SESSION/$stage-$(date -u +%Y%m%dT%H%M%SZ)"
   mkdir -p "$STAGE_DIR"
@@ -383,6 +401,7 @@ HARD CAP:        $V10_CAP_MINUTES minutes (the stage is stopped there and its ev
 model download:  about $V10_DOWNLOAD_GIB GiB into $CACHE (not billed separately, but the time is)
 PLAN
   if [[ -n "${SESSION_BUDGET_MINUTES:-}" ]]; then
+    pod_lifetime_check || return 3
     local used
     used="$(ledger_used_minutes "$(session_dir)/ledger.jsonl")"
     python3 - "$used" "$V10_CAP_MINUTES" "$SESSION_BUDGET_MINUTES" <<'PY' || return 3

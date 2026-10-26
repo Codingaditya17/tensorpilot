@@ -119,3 +119,8 @@ directly. Its limitation is capacity: more client concurrency alone cannot make
 the model decode multiple sequences simultaneously. True batching requires a
 separate execution design, per-sequence cache lifecycle and additional correctness
 tests rather than simply adding worker threads.
+
+## v1.0 CUDA batching and quantization
+
+See [docs/v10-architecture.md](docs/v10-architecture.md): a batched forward pass over a fixed KV slot pool behind the existing adapter interface, explicit NF4
+quantization, and the observability added for the GPU evaluation. Implemented and tested on CPU and in the Linux image; not yet run on a GPU.

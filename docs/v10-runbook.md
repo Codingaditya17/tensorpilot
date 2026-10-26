@@ -27,7 +27,7 @@ are in [`v10-evaluation-plan.md`](v10-evaluation-plan.md).
 
 The entrypoint chooses a verified-writable directory for the model cache and evidence; the login banner prints it (`/workspace/...` normally, container disk with a
 warning if the volume refuses). The experiment image's hard 120-minute lifetime backstop stops GPU billing for a forgotten Pod **only if the container exits**; it does not
-terminate or delete the Pod. Raise it for these sessions: set `TENSORPILOT_POD_MAX_MINUTES` to your session budget plus an hour in the template (a public variable, not a secret).
+terminate or delete the Pod. Raise it for these sessions: set `TENSORPILOT_POD_MAX_MINUTES` to your session budget plus an hour in the template (a public variable, not a secret). The stage runner **refuses to start** if the backstop is shorter than the budget plus 60 minutes, so a forgotten setting cannot end a session mid-stage.
 
 ## 2. Connect and verify (about 3 minutes)
 
