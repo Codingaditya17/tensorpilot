@@ -160,7 +160,7 @@ def test_traceback_file_is_private_redacted_and_keeps_the_report_message_free(tm
     class Broken(FakeBackend):
         def stream(self, prompt, max_tokens):
             raise ValueError("bad shape; token hf_supersecrettokenvalue123 key worker-key-value-1234 "
-                             "header Bearer abcdef")
+                             "header Bearer abcdefghijklmnopqrstuvwx and a bearer token phrase")
             yield  # pragma: no cover
 
     target = tmp_path / "preflight.traceback.txt"
@@ -170,8 +170,9 @@ def test_traceback_file_is_private_redacted_and_keeps_the_report_message_free(tm
     assert "bad shape" not in str(smoke)
     text = target.read_text()
     assert "ValueError: bad shape" in text and "stream" in text and "during generate" in text
-    for leaked in ("hf_supersecrettokenvalue123", "worker-key-value-1234", "abcdef"):
+    for leaked in ("hf_supersecrettokenvalue123", "worker-key-value-1234", "abcdefghijklmnopqrstuvwx"):
         assert leaked not in text
+    assert "bearer token phrase" in text   # ordinary prose is not mistaken for a credential
     assert oct(target.stat().st_mode & 0o777) == "0o600"
 
 

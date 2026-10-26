@@ -11,13 +11,15 @@ a separate package, so the production image is untouched.
 | Published by | git tag `exp-v0.9.1-3` (workflow `experiment-image.yml`). Never moved: a fix gets `exp-v0.9.1-4`. |
 | Registry login | none; the package must be public (check anonymously before renting) |
 
+> Known issue in `v0.9.1-3`: the gateway smoke step fails (see the revision history). The next tag, `exp-v0.9.1-4`, is not published yet.
+
 ## Revision history
 
 | Tag | Status |
 |---|---|
 | `v0.9.1-1` | broken: crashed when the volume refused `chown` |
 | `v0.9.1-2` | broken: the preflight smoke failed on a real RTX 4090 with `ValueError: Expected a torch.device with a specified index` (bare `cuda` passed to `set_per_process_memory_fraction`) |
-| `v0.9.1-3` | current: device resolved to an explicit index (`cuda` becomes `cuda:<current>`, `cuda:N` is range-checked); preflight writes a redacted traceback file |
+| `v0.9.1-3` | preflight and real GPU inference passed on an RTX 4090 (16 tokens), but the gateway smoke failed 5 of 5 with HTTP 401: the data plane had no worker credential. Do not use for the full run; the fix is committed and unpublished, pending review |
 
 This image installs the repository's `tensorpilot` source over the base image's copy (and removes the base
 image's `/app/tensorpilot`, which Python would load first from `/app`). The production image

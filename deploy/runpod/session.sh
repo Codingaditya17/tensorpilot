@@ -151,22 +151,24 @@ TENSORPILOT_WORKER_API_KEY="$TENSORPILOT_API_KEY" TENSORPILOT_CONTROL_API_KEY="$
   --worker "worker-a=http://127.0.0.1:$WORKER_PORT" >"$RESULTS/control.log" 2>&1 &
 PIDS+=($!)
 wait_for_ready "http://127.0.0.1:$CONTROL_PORT/readyz" "${PIDS[-1]}" 120
+# The data plane forwards generate requests to the worker, so it needs the worker credential (it was
+# missing on the first GPU Pod: the worker answered 401 and all five smoke requests failed).
 TENSORPILOT_CONTROL_API_KEY="$TENSORPILOT_CONTROL_API_KEY" TENSORPILOT_DATA_API_KEY="$TENSORPILOT_DATA_API_KEY" \
+  TENSORPILOT_WORKER_API_KEY="$TENSORPILOT_API_KEY" \
   python3 -m tensorpilot.data_plane --host 127.0.0.1 --port "$DATA_PORT" \
   --control-url "http://127.0.0.1:$CONTROL_PORT" >"$RESULTS/data.log" 2>&1 &
 PIDS+=($!)
 wait_for_ready "http://127.0.0.1:$DATA_PORT/readyz" "${PIDS[-1]}" 120
 # The integration check uses the same stream validator as the benchmark: any protocol violation fails it.
+SMOKE_STATUS=0
 TENSORPILOT_API_KEY="$TENSORPILOT_DATA_API_KEY" python3 -m tensorpilot.load \
   --url "http://127.0.0.1:$DATA_PORT" --requests 5 --concurrency 1 --max-tokens 16 --timeout 60 \
-  --output "$RESULTS/gateway-smoke.json" --journal "$RESULTS/gateway-smoke.requests.jsonl"
-python3 - "$RESULTS/gateway-smoke.json" <<'PY'
-import json, sys
-summary = json.load(open(sys.argv[1]))["summary"]
-if summary["failed_requests"] or summary["successful_requests"] != 5:
-    sys.exit("gateway smoke failed: " + json.dumps(summary))
-print("gateway smoke: 5 of 5 streams validated through the data plane")
-PY
+  --output "$RESULTS/gateway-smoke.json" --journal "$RESULTS/gateway-smoke.requests.jsonl" || SMOKE_STATUS=$?
+[[ $SMOKE_STATUS -eq 0 ]] || echo "load client exited with status $SMOKE_STATUS" >&2
+# Prints a sanitized diagnosis (status and error-code breakdown, first failure, log tails) and fails if
+# any of the five streams did not validate. It never skips or weakens the check.
+python3 -m tensorpilot.smoke_check "$RESULTS/gateway-smoke.json" --expect 5 \
+  --log "$RESULTS/worker.log" --log "$RESULTS/control.log" --log "$RESULTS/data.log"
 
 echo "[5/7] benchmark plan and run (caps and abort rules from the config)"
 python3 -m tensorpilot.gpu_bench plan "$BENCH_CONFIG" | tee "$RESULTS/plan.txt"

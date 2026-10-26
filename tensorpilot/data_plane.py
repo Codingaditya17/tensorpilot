@@ -6,6 +6,7 @@ import json
 import os
 import time
 import uuid
+from urllib.parse import urlparse
 
 import aiohttp
 from aiohttp import web
@@ -31,8 +32,11 @@ class DataPlaneMetrics:
         self.outcomes = Counter("tensorpilot_data_plane_outcomes_total", "Gateway outcomes", ["outcome"], **options)
 
 
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
 def create_app(*, control_url, api_key=None, control_api_key=None, max_connections=2048,
-               session_factory=aiohttp.ClientSession):
+               session_factory=aiohttp.ClientSession, worker_api_key=None, allowed_worker_hosts=LOOPBACK_HOSTS):
     control_url = control_url.rstrip("/")
     metrics = DataPlaneMetrics()
 
@@ -124,8 +128,27 @@ def create_app(*, control_url, api_key=None, control_api_key=None, max_connectio
         started = time.perf_counter()
         metrics.active.inc()
         try:
+            # The worker credential is attached per request and only for an allow-listed worker host, so
+            # a routed URL cannot steer it to an arbitrary destination.
+            worker_headers = {}
+            if worker_api_key:
+                if urlparse(route_body["worker_url"]).hostname not in allowed_worker_hosts:
+                    outcome = "worker_host_rejected"
+                    return _error(request, 502, "worker_host_not_allowed",
+                                  "Routed worker host may not receive the worker credential",
+                                  {"X-TensorPilot-Worker": route_body["worker_id"]})
+                worker_headers = {"Authorization": "Bearer " + worker_api_key}
             async with app[WORKER_SESSION].post(route_body["worker_url"] + "/v1/generate", json=forwarded,
+                                         headers=worker_headers,
                                          timeout=aiohttp.ClientTimeout(total=timeout + 5)) as upstream:
+                if upstream.status in (401, 403):
+                    # The caller authenticated to the data plane; the failure is internal. Relaying the
+                    # worker's 401 would blame the caller's token, so it is reported as a gateway fault.
+                    await upstream.read()
+                    outcome = "worker_unauthorized"
+                    return _error(request, 502, "worker_unauthorized",
+                                  "Worker rejected the data plane's credential; check TENSORPILOT_WORKER_API_KEY "
+                                  "on the data plane", {"X-TensorPilot-Worker": route_body["worker_id"]})
                 if upstream.status != 200:
                     data = await upstream.read()
                     outcome = f"worker_http_{upstream.status}"
@@ -205,6 +228,8 @@ def main():
     parser.add_argument("--port", type=int, default=8091)
     parser.add_argument("--control-url", default="http://127.0.0.1:8090")
     parser.add_argument("--max-connections", type=int, default=2048)
+    parser.add_argument("--allow-worker-host", action="append", default=[],
+                        help="extra worker host that may receive TENSORPILOT_WORKER_API_KEY (loopback is always allowed)")
     args = parser.parse_args()
     if not 1 <= args.port <= 65535 or not 1 <= args.max_connections <= 100_000:
         parser.error("port and max-connections must be positive")
@@ -213,7 +238,9 @@ def main():
         parser.error("set TENSORPILOT_DATA_API_KEY before binding a non-loopback address")
     web.run_app(create_app(control_url=args.control_url, api_key=api_key,
                            control_api_key=os.environ.get("TENSORPILOT_CONTROL_API_KEY"),
-                           max_connections=args.max_connections), host=args.host, port=args.port,
+                           max_connections=args.max_connections,
+                           worker_api_key=os.environ.get("TENSORPILOT_WORKER_API_KEY"),
+                           allowed_worker_hosts=tuple(dict.fromkeys((*LOOPBACK_HOSTS, *args.allow_worker_host)))), host=args.host, port=args.port,
                 handler_cancellation=True, access_log=None)
 
 

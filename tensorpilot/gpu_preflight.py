@@ -31,7 +31,7 @@ from .gpu_telemetry import sample_gpus
 SCHEMA = "tensorpilot.gpu-preflight/v2"
 REVISION = re.compile(r"[0-9a-f]{40}")
 SECRET_NAME = re.compile(r"KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL", re.IGNORECASE)
-SECRET_PATTERNS = (re.compile(r"hf_[A-Za-z0-9]{16,}"), re.compile(r"(?i)bearer\s+\S+"))
+SECRET_PATTERNS = (re.compile(r"hf_[A-Za-z0-9]{16,}"), re.compile(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]{16,}"))
 MAX_TRACEBACK_CHARS = 8000
 
 
