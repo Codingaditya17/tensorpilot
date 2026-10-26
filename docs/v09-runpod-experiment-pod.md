@@ -6,12 +6,11 @@ a separate package, so the production image is untouched.
 
 | | |
 |---|---|
-| Image | `ghcr.io/codingaditya17/tensorpilot/cuda-experiment:v0.9.1-3` |
+| Image | `ghcr.io/codingaditya17/tensorpilot/cuda-experiment:v0.9.1-4` |
+| Digest | `sha256:fe252b3e44d04cdef5fa444963b30b7454a0a777a25942401a5f5b2da6274f6d` |
 | Built from | `ghcr.io/codingaditya17/tensorpilot/cuda@sha256:afdc5dc6646040cb486654cc6722a20f2d21a9c080f96ac5f33145a6a1da825a` (v0.9.1) |
-| Published by | git tag `exp-v0.9.1-3` (workflow `experiment-image.yml`). Never moved: a fix gets `exp-v0.9.1-4`. |
+| Published by | git tag `exp-v0.9.1-4` (workflow `experiment-image.yml`). Never moved: a fix gets `exp-v0.9.1-5`. |
 | Registry login | none; the package must be public (check anonymously before renting) |
-
-> Known issue in `v0.9.1-3`: the gateway smoke step fails (see the revision history). The next tag, `exp-v0.9.1-4`, is not published yet.
 
 ## Revision history
 
@@ -19,7 +18,8 @@ a separate package, so the production image is untouched.
 |---|---|
 | `v0.9.1-1` | broken: crashed when the volume refused `chown` |
 | `v0.9.1-2` | broken: the preflight smoke failed on a real RTX 4090 with `ValueError: Expected a torch.device with a specified index` (bare `cuda` passed to `set_per_process_memory_fraction`) |
-| `v0.9.1-3` | preflight and real GPU inference passed on an RTX 4090 (16 tokens), but the gateway smoke failed 5 of 5 with HTTP 401: the data plane had no worker credential. Do not use for the full run; the fix is committed and unpublished, pending review |
+| `v0.9.1-3` | preflight and real GPU inference passed on an RTX 4090 (16 tokens), but the gateway smoke failed 5 of 5 with HTTP 401: the data plane had no worker credential. Do not use: the gateway smoke fails |
+| `v0.9.1-4` | current: the data plane sends the worker credential per request, only to allow-listed hosts; worker redirects are refused; the gateway smoke prints a sanitized diagnosis on failure. Verified without a GPU only; gateway streaming and benchmarks on the RTX 4090 are not yet verified |
 
 This image installs the repository's `tensorpilot` source over the base image's copy (and removes the base
 image's `/app/tensorpilot`, which Python would load first from `/app`). The production image
