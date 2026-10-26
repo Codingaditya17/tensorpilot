@@ -5,6 +5,8 @@ from tensorpilot import stage_info
 
 
 def test_only_allow_listed_environment_names_are_copied(monkeypatch):
+    for name in stage_info.ENV_ALLOWLIST:   # the experiment image sets some of these itself
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("RUNPOD_POD_ID", "pod-9")
     monkeypatch.setenv("TENSORPILOT_API_KEY", "super-secret-key")
     monkeypatch.setenv("HF_TOKEN", "hf_" + "a" * 30)

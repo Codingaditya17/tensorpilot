@@ -46,6 +46,12 @@ construction instead of being assumed to work.
   their filled prefix is copied), so a step reads a contiguous slice instead of gathering.
 - **Staging row.** Prefill runs on a dedicated extra row; the finished row is copied into a decode slot. Waiting sequences hold
   no KV until their turn.
+- **Packed prefill (optional, `--prefill-pack-tokens N`, default 0 = off; rc2).** Fresh prompts at the head of the queue that fit in one chunk run
+  together in one right-padded forward of at most N padded tokens. Causal masking keeps real tokens blind to the padding, each row's logits are
+  gathered at its own last real position, and K/V is written straight into the decode slots the sequences will occupy, so there is no staging copy
+  and no 2 × layers join copy. Sequences that finish on their first token are compacted out. A long prompt, or one already part-way through chunked
+  prefill, ends the pack and takes the staging path, so arrival order is kept. Verified equal to the serial backend on CPU; its GPU effect is
+  unmeasured and is decided by `tensorpilot.packing_gate` (see `v10-production-evaluation.md`).
 - **Chunked prefill, interleaved.** A prompt is processed in `prefill_step_size` chunks, and prefill and decode steps alternate while
   both have work, so a long prompt delays running streams by one chunk, not by its whole length.
 - **Grouped-query attention without copying K/V.** The query-head group is folded into the query-length dimension, so scaled

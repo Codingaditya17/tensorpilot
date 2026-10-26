@@ -153,8 +153,10 @@ If they are too optimistic, experiments stop at their caps and the acceptance it
 
 **Decision gates (stop and bring evidence back if any fails):**
 
-1. After `0.5b-quick-batch` and `0.5b-quick-batch-packed`: `quick_compare` as before on the first; the packed stage's `quick-c32` and `quick-c128` tokens/s must be ≥ 0.95× the unpacked ones, its
-   invariance exact fraction must not be lower, no failures. If packing fails this gate, run the 7B stages with `PREFILL_PACK_TOKENS=0` (the operator override) and record that packing was not used.
+1. After `0.5b-quick-batch` and `0.5b-quick-batch-packed`: `python -m tensorpilot.packing_gate UNPACKED_DIR PACKED_DIR` applies a rule fixed in advance. Any regression
+   (throughput under 0.95× at any shared point, P95 TTFT over 1.10× at c=32 or c=128, a failed request, an invariance result more than one request worse or under 0.90, a failed memory gate)
+   → `REGRESSION`; no regression but no gain (under 1.05× throughput and over 0.9× TTFT at c=128) → `NO_GAIN`. Both mean: run the 7B stages with `PREFILL_PACK_TOKENS=0`.
+   Only `USE_PACKING` carries the unmeasured path into the 7B session. An unmeasured code path with no demonstrated gain has no business in a larger run.
 2. `probe-0.5b` must print no `unexplained` divergence. `unexplained` = a possible defect: do not start the 7B session.
 3. After `7b-bf16-prod`'s memory gate: `kv_pool.capacity_rows` must equal 48.
 4. Read `quality-7b` before the 14B session. If the 14B preflight or smoke fails, terminate rather than debug on a meter.
@@ -186,6 +188,10 @@ export SESSION_BUDGET_MINUTES=36 PRICE_PER_HOUR_USD=<price>
 scale_session.sh 0.5b-quick-batch
 scale_session.sh 0.5b-quick-batch-packed
 scale_session.sh probe-0.5b
+UNPACKED="$(ls -d "$TENSORPILOT_V10_SESSION"/0.5b-quick-batch-2*/ | tail -1)"
+PACKED="$(ls -d "$TENSORPILOT_V10_SESSION"/0.5b-quick-batch-packed-*/ | tail -1)"
+python -m tensorpilot.packing_gate "$UNPACKED" "$PACKED" --output "$TENSORPILOT_V10_SESSION/packing-verdict.json"   # USE_PACKING or not
+python3 -c "import glob,json; print(json.load(open(glob.glob('$TENSORPILOT_V10_SESSION/probe-0.5b-2*/divergence-probe.json')[0]))['meaning'])"
 ```
 
 **D. 7B session** (`SESSION_BUDGET_MINUTES=222`; add `PREFILL_PACK_TOKENS=0` only if gate 1 failed):

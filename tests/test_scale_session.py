@@ -482,3 +482,36 @@ def test_every_stage_records_who_ran_it_without_recording_any_secret(tmp_path):
     assert info["stage"] == "0.5b-serial" and info["environment"]["RUNPOD_POD_ID"] == "pod-1"
     assert info["environment"]["TENSORPILOT_IMAGE_REF"].endswith("a" * 64)
     assert KEY not in (directory / "stage-info.json").read_text() and "TENSORPILOT_API_KEY" not in info["environment"]
+
+
+def run_probe_stage(tmp_path, stage, env=None):
+    """Run stage_probe with a stand-in for the divergence probe that records its command line, so no model is needed."""
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    fake = binary / "python3"
+    record = tmp_path / "argv.txt"
+    fake.write_text(f'#!/bin/bash\nif [[ "$*" == *tensorpilot.divergence_probe* ]]; then echo "$@" > "{record}"; exit 0; fi\n'
+                    f'exec "{sys.executable}" "$@"\n')
+    fake.chmod(0o755)
+    environment = {**os.environ, "PATH": f"{binary}:{os.environ['PATH']}", **(env or {})}
+    environment.pop("TENSORPILOT_POD_MAX_MINUTES", None)
+    snippet = (f'source "{SCRIPT}"; load_stage {stage}; STAGE_DIR="{tmp_path}"; CACHE="{tmp_path}/cache"; stage_probe')
+    done = subprocess.run(["bash", "-c", snippet], env=environment, capture_output=True, text=True, cwd=ROOT)
+    return done, record
+
+
+def test_the_probe_stage_hands_the_divergence_probe_the_stage_settings(tmp_path):
+    done, record = run_probe_stage(tmp_path, "probe-7b")
+    assert done.returncode == 0, done.stderr
+    argv = record.read_text().split()
+    pairs = dict(zip(argv, argv[1:]))
+    assert pairs["--model"] == "Qwen/Qwen2.5-7B-Instruct" and pairs["--revision"] == "a09a35458c702b33eeacc393d103063234e8bc28"
+    assert pairs["--dtype"] == "bfloat16" and pairs["--quantization"] == "none" and pairs["--prompts"] == "32"
+    assert pairs["--prefill-pack-tokens"] == "2048" and pairs["--output"] == f"{tmp_path}/divergence-probe.json"
+
+
+def test_the_operator_packing_override_reaches_the_probe_too(tmp_path):
+    done, record = run_probe_stage(tmp_path, "probe-0.5b", env={"PREFILL_PACK_TOKENS": "0"})
+    assert done.returncode == 0, done.stderr
+    argv = record.read_text().split()
+    assert dict(zip(argv, argv[1:]))["--prefill-pack-tokens"] == "0" and "float16" in argv
