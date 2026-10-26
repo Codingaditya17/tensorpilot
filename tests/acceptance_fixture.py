@@ -134,12 +134,10 @@ class Session:
         for stage in ("7b-bf16-prod-serial", "7b-bf16-prod", "14b-nf4-prod", "vllm-7b-bf16-prod"):
             self.finish_stage(stage)
         (self.stage_dir("7b-bf16-prod") / "invariance.json").write_text(json.dumps(invariance(1.0)))
-        probe = {"passed": True, "prompts": 32, "exact_matches": 32, "near_tie": 0, "unexplained": 0}
-        for stage in ("probe-7b", "probe-0.5b"):
-            (self.stage_dir(stage) / "divergence-probe.json").write_text(json.dumps(probe))
+        (self.stage_dir("probe-7b") / "divergence-probe.json").write_text(json.dumps(probe_report(2048, [])))
         (self.stage_dir("0.5b-quick-batch") / "invariance.json").write_text(json.dumps(invariance(0.96875)))
-        probe_near = dict(probe, exact_matches=31, near_tie=1)
-        (self.stage_dir("probe-0.5b") / "divergence-probe.json").write_text(json.dumps(probe_near))
+        # the unpacked quick run diverged on request 21; a probe with the same (zero) packing reproduces it as a near-tie
+        (self.stage_dir("probe-0.5b") / "divergence-probe.json").write_text(json.dumps(probe_report(0, [21])))
         quality = self.stage_dir("quality-7b")
         (quality / "comparison.json").write_text(json.dumps(
             comparison(1.03, 0.95)))
@@ -163,10 +161,19 @@ class Session:
             self.experiment(stage, "ladder-poisson", records, tps=tps, rate=float(rate), label=f"rate{rate}.0")
 
 
-def invariance(fraction):
+def probe_report(pack, near_tie_indices, unexplained_indices=()):
+    rows = [{"index": i, "verdict": "near_tie"} for i in near_tie_indices] + \
+           [{"index": i, "verdict": "unexplained"} for i in unexplained_indices]
+    return {"passed": not unexplained_indices, "prompts": 32, "exact_matches": 32 - len(rows), "near_tie": len(near_tie_indices),
+            "unexplained": len(unexplained_indices), "diverged_requests": rows,
+            "settings": {"prefill_pack_tokens": pack, "capacity": 32}}
+
+
+def invariance(fraction, diverged=(21,)):
     exact = round(fraction * 32)
     entry = {"exact_match_fraction": fraction, "comparable": 32, "exact_matches": exact, "mean_prefix_fraction": fraction,
-             "earliest_divergence": None if exact == 32 else 7, "median_divergence": None if exact == 32 else 7}
+             "earliest_divergence": None if exact == 32 else 7, "median_divergence": None if exact == 32 else 7,
+             "diverged_requests": [] if exact == 32 else [{"index": i, "first_divergence": 7} for i in diverged]}
     return {"together_vs_solo": entry, "staggered_vs_solo": entry}
 
 

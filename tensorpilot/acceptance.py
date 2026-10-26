@@ -217,28 +217,62 @@ def check_integrity(session):
                 unaccounted=len(unaccounted))
 
 
-def check_exactness(session, stage_name, probe_stage, criterion_id, title):
-    stage, probe_dir = session.get(stage_name), session.get(probe_stage)
+def probe_reports(root, stage):
+    """Every divergence-probe.json for ``stage`` under ``root``: the same probe may be run with different packing settings."""
+    found = []
+    for directory in sorted(Path(root).iterdir()):
+        match = report_v10.STAGE_DIR.match(directory.name) if directory.is_dir() else None
+        report = _json(directory / "divergence-probe.json") if match and match["stage"] == stage else None
+        if report:
+            found.append(report)
+    return found
+
+
+def effective_pack(stage, stage_name):
+    """The prefill packing the worker of ``stage`` really ran with: the operator override recorded in stage-info, else the default."""
+    override = ((_json(stage["dir"] / "stage-info.json") or {}).get("environment") or {}).get("PREFILL_PACK_TOKENS") if stage else None
+    if override is not None:
+        return int(override)
+    return int(suite.STAGES.get(stage_name, {}).get("prefill_pack", 0))
+
+
+def check_exactness(session, stage_name, probe_stage, criterion_id, title, root):
+    """Exact, or every diverged request reproduced by a probe with the SAME packing setting and classified as a near-tie.
+
+    A probe that merely passes proves nothing about a specific divergence: batch shapes, and so the flips, depend on the schedule.
+    """
+    stage = session.get(stage_name)
     invariance = (stage or {}).get("invariance")
-    probe = _json(probe_dir["dir"] / "divergence-probe.json") if probe_dir else None
     if not invariance:
         return Item(criterion_id, 1, title, "correctness", INCONCLUSIVE,
                     f"no invariance.json in {stage_name}: the batch-invariance check did not run or did not complete")
     fractions = {k: invariance[k]["exact_match_fraction"] for k in ("together_vs_solo", "staggered_vs_solo")}
     if all(v == 1.0 for v in fractions.values()):
-        return Item(criterion_id, 1, title, "correctness", PASS, "every request matched its solo output exactly",
-                    **fractions)
-    if probe is None:
+        return Item(criterion_id, 1, title, "correctness", PASS, "every request matched its solo output exactly", **fractions)
+    diverged = {r["index"] for k in fractions for r in invariance[k].get("diverged_requests", [])}
+    pack = effective_pack(stage, stage_name)
+    probes = probe_reports(root, probe_stage)
+    unexplained = [r["index"] for p in probes for r in p.get("diverged_requests", []) if r.get("verdict") != "near_tie"]
+    if unexplained:
+        return Item(criterion_id, 1, title, "correctness", FAIL,
+                    f"exact-match fractions {fractions}; a probe found divergence NOT explained by rounding (requests {sorted(unexplained)})",
+                    **fractions, unexplained=sorted(unexplained))
+    matching = [p for p in probes if (p.get("settings") or {}).get("prefill_pack_tokens") == pack]
+    if not matching:
         return Item(criterion_id, 1, title, "correctness", INCONCLUSIVE,
-                    f"exact-match fractions {fractions}: the divergence is not explained yet (run the divergence probe)",
-                    **fractions)
-    status = PASS if probe.get("passed") else FAIL
-    return Item(criterion_id, 1, title, "correctness", status,
-                f"exact-match fractions {fractions}; probe: {probe.get('exact_matches')}/{probe.get('prompts')} identical, "
-                f"{probe.get('near_tie')} near-tie, {probe.get('unexplained')} unexplained. "
-                + ("every divergence is a rounding-level near-tie (documented numerical divergence)" if status == PASS
-                   else "at least one divergence is NOT explained by rounding"), **fractions,
-                near_tie=probe.get("near_tie"), unexplained=probe.get("unexplained"))
+                    f"exact-match fractions {fractions}, diverged requests {sorted(diverged)}: no {probe_stage} probe ran with prefill "
+                    f"packing {pack} (the setting that produced them)", **fractions)
+    explained = {r["index"] for p in matching for r in p.get("diverged_requests", []) if r.get("verdict") == "near_tie"}
+    reproduced = diverged & explained
+    if diverged - explained:
+        return Item(criterion_id, 1, title, "correctness", INCONCLUSIVE,
+                    f"exact-match fractions {fractions}: the probe (packing {pack}) did not reproduce requests "
+                    f"{sorted(diverged - explained)}, so their divergence is not yet explained by logits", **fractions,
+                    explained=sorted(reproduced))
+    return Item(criterion_id, 1, title, "correctness", PASS,
+                f"exact-match fractions {fractions}; every diverged request {sorted(diverged)} was reproduced by the probe "
+                f"(packing {pack}) and is a rounding-level near-tie (documented numerical divergence)", **fractions,
+                explained=sorted(reproduced))
 
 
 def _perplexity(capture):
@@ -790,9 +824,12 @@ def evaluate(session_dir, *, criteria=None, ledgers=(), archives=(), report=None
         check_protocol(session, criteria),
         check_integrity(session),
         check_exactness(session, "7b-bf16-prod", "probe-7b", "1.exact-match-7b-bf16",
-                        "7B BF16 batched output equals solo output, or every divergence is explained"),
+                        "7B BF16 batched output equals solo output, or every divergence is explained", root),
         check_exactness(session, "0.5b-quick-batch", "probe-0.5b", "1.quick-session-divergence-explained",
-                        "The quick session's 31/32 divergence is explained with logits"),
+                        "The quick session's 31/32 divergence is explained with logits", root),
+        *([check_exactness(session, "0.5b-quick-batch-packed", "probe-0.5b", "1.packed-session-divergence-explained",
+                           "The packed run's divergences are explained with logits", root)]
+          if "0.5b-quick-batch-packed" in session else []),
         check_nf4_7b(session, criteria),
         check_nf4_14b(session, criteria),
         check_levels(session, "7b-bf16-prod", "7b", criteria),

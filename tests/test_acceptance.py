@@ -8,7 +8,7 @@ import sys
 
 import pytest
 
-from acceptance_fixture import Session, archive, capture, good_records, invariance, record
+from acceptance_fixture import Session, archive, capture, good_records, invariance, probe_report, record
 from tensorpilot import acceptance
 from tensorpilot.acceptance import FAIL, INCONCLUSIVE, PASS
 
@@ -119,16 +119,53 @@ def test_a_request_missing_from_the_journal_is_unaccounted(good, tmp_path):
     assert "journal has 11 records" in next(r for r in verdict["items"] if r["id"].startswith("1.no-trunc"))["detail"]
 
 
-def test_bf16_divergence_without_an_explanation_is_inconclusive_with_a_near_tie_explanation_a_pass_and_unexplained_a_fail(good, tmp_path):
-    stage = good.stage_dir("7b-bf16-prod")
-    (stage / "invariance.json").write_text(json.dumps(invariance(0.96875)))
-    probe = good.stage_dir("probe-7b") / "divergence-probe.json"
-    probe.unlink()
-    assert status(run(good, tmp_path), "1.exact-match-7b") == INCONCLUSIVE
-    probe.write_text(json.dumps({"passed": True, "prompts": 32, "exact_matches": 31, "near_tie": 1, "unexplained": 0}))
-    assert status(run(good, tmp_path), "1.exact-match-7b") == PASS
-    probe.write_text(json.dumps({"passed": False, "prompts": 32, "exact_matches": 31, "near_tie": 0, "unexplained": 1}))
+def probe_file(session, stage="probe-7b"):
+    return session.stage_dir(stage) / "divergence-probe.json"
+
+
+def test_bf16_divergence_needs_a_probe_that_reproduced_it_with_the_same_packing(good, tmp_path):
+    (good.stage_dir("7b-bf16-prod") / "invariance.json").write_text(json.dumps(invariance(0.96875, diverged=(21,))))
+    path = probe_file(good)
+    path.unlink()
+    assert status(run(good, tmp_path), "1.exact-match-7b") == INCONCLUSIVE            # no probe at all
+    path.write_text(json.dumps(probe_report(2048, [])))
+    assert status(run(good, tmp_path), "1.exact-match-7b") == INCONCLUSIVE            # a passing probe that did not reproduce 21
+    path.write_text(json.dumps(probe_report(0, [21])))
+    assert status(run(good, tmp_path), "1.exact-match-7b") == INCONCLUSIVE            # reproduced, but with different packing
+    path.write_text(json.dumps(probe_report(2048, [21])))
+    assert status(run(good, tmp_path), "1.exact-match-7b") == PASS                    # reproduced with the same packing
+    path.write_text(json.dumps(probe_report(2048, [], unexplained_indices=[5])))
     assert status(run(good, tmp_path), "1.exact-match-7b") == FAIL
+
+
+def test_every_diverged_request_must_be_reproduced_not_just_one(good, tmp_path):
+    (good.stage_dir("7b-bf16-prod") / "invariance.json").write_text(json.dumps(invariance(0.9375, diverged=(21, 22))))
+    probe_file(good).write_text(json.dumps(probe_report(2048, [21])))
+    verdict = run(good, tmp_path)
+    row = next(r for r in verdict["items"] if r["id"] == "1.exact-match-7b-bf16")
+    assert row["status"] == INCONCLUSIVE and "[22]" in row["detail"]
+
+
+def test_the_operator_packing_override_is_what_the_probe_must_match(good, tmp_path):
+    info = good.stage_dir("7b-bf16-prod") / "stage-info.json"
+    data = json.loads(info.read_text())
+    data["environment"]["PREFILL_PACK_TOKENS"] = "512"
+    info.write_text(json.dumps(data))
+    (good.stage_dir("7b-bf16-prod") / "invariance.json").write_text(json.dumps(invariance(0.96875)))
+    probe_file(good).write_text(json.dumps(probe_report(2048, [21])))
+    assert status(run(good, tmp_path), "1.exact-match-7b") == INCONCLUSIVE
+    probe_file(good).write_text(json.dumps(probe_report(512, [21])))
+    assert status(run(good, tmp_path), "1.exact-match-7b") == PASS
+
+
+def test_probes_run_with_different_packing_settings_are_all_considered(good, tmp_path):
+    good.root.joinpath("probe-0.5b-20260101T000000Z").mkdir()
+    (good.root / "probe-0.5b-20260101T000000Z" / "divergence-probe.json").write_text(json.dumps(probe_report(2048, [2])))
+    assert status(run(good, tmp_path), "1.quick-session-divergence") == PASS
+    good.root.joinpath("probe-0.5b-20260101T000001Z").mkdir()
+    (good.root / "probe-0.5b-20260101T000001Z" / "divergence-probe.json").write_text(
+        json.dumps(probe_report(2048, [], unexplained_indices=[9])))
+    assert status(run(good, tmp_path), "1.quick-session-divergence") == FAIL
 
 
 def test_the_quick_session_divergence_needs_its_own_logit_evidence(good, tmp_path):

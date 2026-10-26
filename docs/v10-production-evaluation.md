@@ -139,7 +139,7 @@ price and the plan recomputes, scaling budgets down together and reporting any s
 | Session | Stages (in order) | Expected stage min | `SESSION_BUDGET_MINUTES` | Overhead + slack assumed | Expected | Worst case |
 |---|---|---|---|---|---|---|
 | **gate** | `0.5b-quick-batch`, `0.5b-quick-batch-packed`, `probe-0.5b` | 17.8 | 36 | 25 + 15 | $0.64 | $1.14 |
-| **7b** | `probe-7b`, `7b-bf16-prod-serial`, `7b-bf16-prod`, `faults-7b`, `quality-7b`, `vllm-7b-bf16-prod` | 158.7 | 222 | 75 + 15 | $3.51 | $4.68 |
+| **7b** | `probe-0.5b` (unpacked), `probe-7b`, `7b-bf16-prod-serial`, `7b-bf16-prod`, `faults-7b`, `quality-7b`, `vllm-7b-bf16-prod` | 158.7 | 222 | 75 + 15 | $3.51 | $4.68 |
 | **14b** | `14b-nf4-prod`, `quality-14b` | 54.3 | 105 | 83 + 15 | $2.06 | $3.05 |
 | **Core total** | | | | | **$6.21** | **$8.87** |
 | optional `14b-vllm` | `vllm-14b-nf4-prod` | 39.3 | | 55 + 15 | | +$2.48 (outside the $9) |
@@ -160,6 +160,27 @@ If they are too optimistic, experiments stop at their caps and the acceptance it
 2. `probe-0.5b` must print no `unexplained` divergence. `unexplained` = a possible defect: do not start the 7B session.
 3. After `7b-bf16-prod`'s memory gate: `kv_pool.capacity_rows` must equal 48.
 4. Read `quality-7b` before the 14B session. If the 14B preflight or smoke fails, terminate rather than debug on a meter.
+
+## 6a. Gate session results (2026-10-26, RTX 4090 UUID `GPU-2b01fb0b…`, image `v1.0.0-rc2-1`, evidence checksums verified)
+
+Three stages, all exit 0 (2.5, 2.1 and 0.7 minutes). Unpacked `quick-c128` 746 tok/s, packed 2,257 (**3.03×**); P95 TTFT at c=128 5.72 s → 0.309 s; c=32 636 → 835 tok/s; c=1 and c=8 not worse
+(1.03×, 1.08×). `packing_gate` → **USE_PACKING**, reproduced here from the raw reports. The unpacked numbers reproduce the first session on a different Pod (746 vs 759 tok/s at c=128; 20.7 ms decode step;
+GPU utilization 18%), so the flat-step finding is not a one-Pod artifact. Packed: tokens per step at c=128 rose from 24.7 to 46.7 and prefill's share of engine time fell from 42% to 22%.
+
+What the gate does **not** settle:
+
+- **Packing makes inter-token latency worse at c=128** (P95 53.7 → 63.0 ms): one packed forward stalls decode longer than one single-prompt forward. On the 0.5B model that is invisible next to the launch overhead.
+  On 7B prefill is compute-bound, and an order-of-magnitude estimate (15 GFLOP per token, 50–80 TFLOP/s effective in bf16 on a 4090; **an assumption, not a measurement**) puts a 2,048-token pack near 0.4–0.6 s
+  of stall and a 512-token pack near 0.1–0.15 s, against a 150 ms inter-token target. The 7B session therefore overrides the pack budget to **512**. That value is unmeasured on any GPU; the engine-profile table (ms per prefill
+  chunk) and the operating-point inter-token latency will show whether it was right.
+- **Invariance is at the gate's tolerance edge.** Unpacked 31/32 (request 21, token 7: the same request and token as the first session, so it is deterministic); packed 30/32 (requests 21 and 22, both token 7). 0.9375 equals
+  the rule's floor (0.96875 − 1/32). Passing is correct by the rule fixed in advance; it is not comfortable.
+- **The probe did not explain those divergences.** It ran with packing on and all 32 prompts inserted at once, so its batch shapes differ from the HTTP run's; it found a different request (index 2, first token,
+  fp16 logit gaps of 1 ulp and exactly 0, a genuine tie) and none of 21 or 22. That is a real near-tie, but it is not evidence about 21 or 22. The acceptance check now requires every diverged request in the invariance run to
+  be reproduced by a probe run **with the same packing setting**; until then the item is INCONCLUSIVE (it is, for both gate stages). The unpacked HTTP path is deterministic and equals the probe's order, so
+  `PREFILL_PACK_TOKENS=0 scale_session.sh probe-0.5b` should reproduce request 21; it is the first stage of the 7B session.
+- **The Pod's image reference and Pod id were not recorded**: the entrypoint forwards only a fixed allow-list of variables to SSH sessions, so `TENSORPILOT_IMAGE_REF` (and `RUNPOD_POD_ID`) set in the Runpod
+  console never reach `stage-info.json`. Export them in the SSH session before the first stage. The GPU UUID, which proves the physical card, was recorded.
 
 ## 7. Exact commands (nothing below has been run)
 

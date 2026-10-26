@@ -239,8 +239,11 @@ SLACK_MINUTES = 15
 SESSIONS = {
     "gate": {"stages": ["0.5b-quick-batch", "0.5b-quick-batch-packed", "probe-0.5b"], "overhead_minutes": 25,
              "purpose": "does packed prefill help or hurt, and is every solo-vs-batched divergence a rounding-level near-tie?"},
-    "7b": {"stages": ["probe-7b", "7b-bf16-prod-serial", "7b-bf16-prod", "faults-7b", "quality-7b", "vllm-7b-bf16-prod"],
-           "overhead_minutes": 75, "purpose": "7B bf16: serial baseline, scale sweep, reliability, crash recovery, vLLM"},
+    # probe-0.5b runs first with PREFILL_PACK_TOKENS=0: the unpacked HTTP path is deterministic and equals the probe's insert-all-then-step
+    # order, so it reproduces (and explains with logits) the quick-session divergence that the packed gate-session probe did not.
+    "7b": {"stages": ["probe-0.5b", "probe-7b", "7b-bf16-prod-serial", "7b-bf16-prod", "faults-7b", "quality-7b",
+                      "vllm-7b-bf16-prod"],
+           "overhead_minutes": 78, "purpose": "7B bf16: serial baseline, scale sweep, reliability, crash recovery, vLLM"},
     "14b": {"stages": ["14b-nf4-prod", "quality-14b"], "overhead_minutes": 83,
             "purpose": "14B NF4: load, generate, scale sweep, fidelity"},
 }
