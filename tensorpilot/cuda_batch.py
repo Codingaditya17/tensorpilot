@@ -190,7 +190,9 @@ class CUDABatchAdapter:
         # Packed prefill runs several fresh, single-chunk prompts in one right-padded forward and writes their K/V
         # straight into the decode slots they will occupy. 0 keeps the one-prompt-per-forward path with a staging row.
         self.prefill_pack_tokens = prefill_pack_tokens
-        self.margin_probe = None     # diagnostics: {uid: [(top1_id, top2_id, top1_logit, top2_logit) per emitted token]}; None = off
+        self.margin_probe = None     # diagnostics: {uid: [(top-k ids, top-k logits) per emitted token]}, argmax token first; None = off
+        self.logit_capture_filter = None   # diagnostics: callable (uid, step) -> bool; the full logit row of matching steps is kept
+        self.logit_capture = {}            # {(uid, step): float32 CPU tensor}
         model = backend.model
         self.geometry = read_geometry(model.config)
         module = sys.modules[type(model).__module__]
@@ -383,15 +385,34 @@ class CUDABatchAdapter:
             self.torch.cuda.empty_cache()
         raise error
 
+    PROBE_TOP_K = 8
+
     def _choose(self, rows, uids):
-        """Greedy token per row. With the diagnostic probe on, also record each row's two best tokens and logits."""
-        if self.margin_probe is None:
-            return self.torch.argmax(rows, dim=-1).tolist()
-        top = self.torch.topk(rows.float(), 2, dim=-1)
-        ids, values = top.indices.tolist(), top.values.tolist()
-        for uid, (first, second), (high, low) in zip(uids, ids, values):
-            self.margin_probe.setdefault(uid, []).append((first, second, high, low))
-        return [first for first, _ in ids]
+        """Greedy token per row: ``argmax``, always, exactly as production does.
+
+        With the diagnostic probe on, the candidates are also recorded, but they never decide the token. An earlier version took the token
+        from ``topk``, whose order among exactly equal logits is unspecified and depends on the tensor's shape; bf16 logits tie exactly
+        often, so the probe then measured its own tie-breaking instead of the engine's. The recorded list always begins with the
+        argmax token, followed by the next best (value descending, token id ascending), as (ids, values).
+        """
+        torch = self.torch
+        chosen = torch.argmax(rows, dim=-1)
+        if self.margin_probe is None and self.logit_capture_filter is None:
+            return chosen.tolist()
+        floats = rows.float()
+        k = min(self.PROBE_TOP_K, floats.shape[-1])
+        top = torch.topk(floats, k, dim=-1)
+        ids, values, picked = top.indices.tolist(), top.values.tolist(), chosen.tolist()
+        picked_values = floats.gather(-1, chosen.unsqueeze(-1)).squeeze(-1).tolist()
+        for row, uid in enumerate(uids):
+            order = sorted((pair for pair in zip(ids[row], values[row]) if pair[0] != picked[row]), key=lambda pair: (-pair[1], pair[0]))
+            candidates = [(picked[row], picked_values[row])] + order[:k - 1]
+            step = len(self.margin_probe.get(uid, [])) if self.margin_probe is not None else 0
+            if self.margin_probe is not None:
+                self.margin_probe.setdefault(uid, []).append(([c[0] for c in candidates], [c[1] for c in candidates]))
+            if self.logit_capture_filter is not None and self.logit_capture_filter(uid, step):
+                self.logit_capture[(uid, step)] = floats[row].cpu()
+        return picked
 
     def _pack_group(self):
         """The longest FIFO prefix of fresh, single-chunk prompts that fits the packing budget (padded tokens)."""

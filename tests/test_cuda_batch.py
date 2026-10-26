@@ -536,7 +536,7 @@ def test_packing_validation_and_default_off(backend):
             make_adapter(backend, prefill_pack_tokens=bad)
 
 
-def test_the_margin_probe_records_one_gap_per_emitted_token_and_never_changes_the_output(backend):
+def test_the_probe_records_the_candidates_of_every_emitted_token_and_never_changes_the_output(backend):
     plan = [(0, prompt_of(length, seed + 140), 9) for seed, length in enumerate([4, 7, 3, 10])]
     quiet = drive(make_adapter(backend, capacity=4, prefill_pack_tokens=PACK), plan)
     adapter = make_adapter(backend, capacity=4, prefill_pack_tokens=PACK)
@@ -544,5 +544,188 @@ def test_the_margin_probe_records_one_gap_per_emitted_token_and_never_changes_th
     probed = drive(adapter, plan)
     assert {i: r["ids"] for i, r in probed.items()} == {i: r["ids"] for i, r in quiet.items()}
     assert sorted(len(v) for v in adapter.margin_probe.values()) == sorted(len(r["ids"]) for r in probed.values())
-    assert all(high >= low and first != second
-               for steps in adapter.margin_probe.values() for first, second, high, low in steps)
+    for uid, steps in adapter.margin_probe.items():
+        emitted = next(r["ids"] for i, r in probed.items() if i == uid)
+        for (ids, values), token in zip(steps, emitted):
+            assert ids[0] == token, "the first candidate is always the token the engine really chose"
+            assert len(ids) == len(set(ids)) == min(adapter.PROBE_TOP_K, len(ids)) and values[0] == max(values)
+            assert values[1:] == sorted(values[1:], reverse=True)
+
+
+def _tie_heavy(adapter, seed):
+    """Replace the logits with coarse values full of exact ties, as bf16 logits are, but keep every real state update."""
+    torch = adapter.torch
+    original = adapter._forward
+    generator = torch.Generator().manual_seed(seed)
+    seen = []
+
+    def forward(*args, **kwargs):
+        out = original(*args, **kwargs)
+        coarse = torch.randint(0, 4, out.shape, generator=generator).to(out.dtype)
+        seen.append(coarse.reshape(-1, coarse.shape[-1]))
+        return coarse
+
+    adapter._forward = forward
+    return seen
+
+
+def test_probe_mode_chooses_exactly_the_token_production_chooses_even_among_exact_ties(backend):
+    """The real probe-7b failure: the probe took its token from topk, whose order among exactly equal logits is unspecified
+    and shape-dependent (bf16 logits tie constantly), so it measured its own tie-breaking, not the engine's."""
+    plan = [(0, prompt_of(length, seed + 200), 12) for seed, length in enumerate([5, 9, 3, 7, 11, 4])]
+    production = make_adapter(backend, capacity=6, prefill_pack_tokens=PACK)
+    seen_production = _tie_heavy(production, 11)
+    expected = drive(production, plan)
+    probed = make_adapter(backend, capacity=6, prefill_pack_tokens=PACK)
+    probed.margin_probe = {}
+    seen_probed = _tie_heavy(probed, 11)
+    actual = drive(probed, plan)
+    assert {i: r["ids"] for i, r in actual.items()} == {i: r["ids"] for i, r in expected.items()}
+    # non-vacuous: on these very logits topk's first index is NOT argmax's, so the old probe would have diverged from production
+    rows = torch.cat(seen_production)
+    assert (torch.topk(rows.float(), 2, dim=-1).indices[:, 0] != torch.argmax(rows, dim=-1)).any()
+    assert len(seen_production) == len(seen_probed)
+
+
+def test_a_probe_that_chose_by_topk_would_have_diverged_from_production_on_those_ties(backend):
+    """Proves the regression test above can fail: select by topk's first index in probe mode and the tokens differ."""
+    plan = [(0, prompt_of(length, seed + 200), 12) for seed, length in enumerate([5, 9, 3, 7, 11, 4])]
+    production = make_adapter(backend, capacity=6, prefill_pack_tokens=PACK)
+    _tie_heavy(production, 11)
+    expected = drive(production, plan)
+    old_style = make_adapter(backend, capacity=6, prefill_pack_tokens=PACK)
+    old_style.margin_probe = {}
+    _tie_heavy(old_style, 11)
+    original = old_style._choose
+
+    def topk_first(rows, uids):
+        original(rows, uids)
+        return torch.topk(rows.float(), 2, dim=-1).indices[:, 0].tolist()
+
+    old_style._choose = topk_first
+    actual = drive(old_style, plan)
+    assert {i: r["ids"] for i, r in actual.items()} != {i: r["ids"] for i, r in expected.items()}
+
+
+def test_capturing_full_logit_rows_keeps_the_requested_steps_and_changes_nothing(backend):
+    plan = [(0, prompt_of(length, seed + 260), 8) for seed, length in enumerate([4, 6, 5])]
+    quiet = drive(make_adapter(backend, capacity=3, prefill_pack_tokens=PACK), plan)
+    adapter = make_adapter(backend, capacity=3, prefill_pack_tokens=PACK)
+    adapter.logit_capture_filter = lambda uid, step: uid == 1 and step in (0, 3)
+    adapter.margin_probe = {}
+    captured = drive(adapter, plan)
+    assert {i: r["ids"] for i, r in captured.items()} == {i: r["ids"] for i, r in quiet.items()}
+    assert sorted(adapter.logit_capture) == [(1, 0), (1, 3)]
+    row = adapter.logit_capture[(1, 3)]
+    assert row.dtype == torch.float32 and int(torch.argmax(row)) == adapter.margin_probe[1][3][0][0]
+
+
+# ----- the batched and packed paths are exact in infinite-precision terms (the real probe-7b investigation) -----------
+
+@pytest.fixture(params=["llama", "qwen2"])
+def backend64(request, model_dir, qwen2_dir):
+    """A float64 copy of the tiny model: rounding is ~1e-16, so any mask, position or KV mistake shows as an enormous error."""
+    backend = make_backend(model_dir, request.param, qwen2_dir)
+    backend.model = backend.model.double().eval()
+    backend.compute_dtype = torch.float64
+    return backend
+
+
+def logit_errors(backend, plan, *, pack, step=16, capacity=12, arrivals=None):
+    """Run the plan through the adapter and compare every row of every step with a full recompute by the Transformers model.
+
+    Returns (worst absolute logit error, rows checked, adapter counters).
+    """
+    adapter = make_adapter(backend, capacity=capacity, prefill_step_size=step, prefill_pack_tokens=pack)
+    assert adapter.dtype == torch.float64
+    captured, original = [], adapter._forward
+    adapter._forward = lambda *a, **k: (captured.append(original(*a, **k).detach().clone()), captured[-1])[1]
+    prompts = [backend.tokenizer.encode(p) for p, _ in plan]
+    arrivals = arrivals or [0] * len(plan)
+    index_of, generated, pending, tick, worst, rows_checked = {}, {}, list(enumerate(plan)), 0, 0.0, 0
+    while pending or adapter.sequences:
+        while pending and arrivals[pending[0][0]] <= tick:
+            i, (prompt, budget) = pending.pop(0)
+            uid = adapter.insert(prompt, budget)
+            index_of[uid], generated[i] = i, []
+        if not adapter.sequences:
+            tick += 1
+            continue
+        prefilling = bool(adapter.prefill_queue) and (not adapter.decoding or adapter.last_phase == "decode")
+        group = adapter._pack_group() if prefilling else []
+        if group:
+            contexts = [prompts[index_of[s.uid]] for s in group]
+        elif prefilling:
+            uid = adapter.prefill_queue[0]
+            contexts = [prompts[index_of[uid]][:min(adapter.sequences[uid].prefilled + adapter.prefill_step_size,
+                                                    len(prompts[index_of[uid]]))]]
+        else:
+            contexts = [prompts[index_of[u]] + generated[index_of[u]] for u in adapter.decoding]
+        captured.clear()
+        result = adapter.step()
+        tick += 1
+        assert len(captured) == 1 and captured[0].shape[0] == len(contexts)
+        for row, context in enumerate(contexts):
+            with torch.inference_mode():
+                reference = backend.model(torch.tensor([context])).logits[0, -1]
+            worst = max(worst, (captured[0][row, -1] - reference).abs().max().item())
+            rows_checked += 1
+        for uid, token in result.events:
+            if token.output:
+                generated[index_of[uid]].append(token.token_id)
+    return worst, rows_checked, adapter.counters
+
+
+EXACT = 1e-12   # float64 rounding is ~1e-16; a masking, position or KV error of any practical size is many orders larger
+
+BURST = [(prompt_of(n, 100 + n), m) for n, m in [(1, 9), (3, 1), (7, 12), (12, 4), (5, 9), (2, 15), (9, 3), (5, 8), (14, 6), (4, 10)]]
+MIXED = [(prompt_of(n, 300 + n), m) for n, m in [(4, 6), (40, 5), (5, 6), (6, 6), (3, 8), (30, 4), (2, 5)]]
+STAGGER = [0, 0, 0, 3, 3, 5, 9, 9, 12, 12]
+
+
+@pytest.mark.parametrize("pack", [0, 64, 256])
+def test_a_burst_of_mixed_length_prompts_has_exact_logits_at_every_step_packed_or_not(backend64, pack):
+    worst, rows, counters = logit_errors(backend64, BURST, pack=pack)
+    assert worst < EXACT and rows >= 70
+    if pack:
+        assert counters["prefill_packed_forwards"] >= 1 and counters["prefill_packed_sequences"] >= 6, "padding must really occur"
+
+
+@pytest.mark.parametrize("pack", [0, 64])
+def test_staggered_arrivals_with_slot_compaction_have_exact_logits(backend64, pack):
+    worst, rows, counters = logit_errors(backend64, BURST, pack=pack, arrivals=STAGGER)
+    assert worst < EXACT and rows >= 70
+    assert counters["slot_moves"] >= 1, "the test must exercise the slot-compaction copy"
+    if pack:
+        assert counters["prefill_packed_forwards"] >= 3
+
+
+@pytest.mark.parametrize("pack", [0, 64])
+def test_long_prompts_chunked_beside_packed_short_ones_have_exact_logits(backend64, pack):
+    worst, rows, _ = logit_errors(backend64, MIXED, pack=pack, step=8)
+    assert worst < EXACT and rows >= 40
+
+
+def test_the_logit_check_would_catch_a_padding_leak(backend64):
+    """Non-vacuity: let padded keys be attended (a non-causal mask in the packed forward) and the error is enormous."""
+    adapter_class = CUDABatchAdapter
+    original = adapter_class._prefill_packed
+
+    def leaky(self, group):
+        forward = self._forward
+
+        def non_causal(ids, positions, mask, write, kv_rows, width, last_only):
+            return forward(ids, positions, torch.ones_like(mask), write, kv_rows, width, last_only)
+
+        self._forward = non_causal
+        try:
+            return original(self, group)
+        finally:
+            self._forward = forward
+
+    adapter_class._prefill_packed = leaky
+    try:
+        worst, _, _ = logit_errors(backend64, BURST, pack=256)
+    finally:
+        adapter_class._prefill_packed = original
+    assert worst > 1e-3

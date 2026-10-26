@@ -57,7 +57,7 @@ discrepancy is plausibly a numeric near-tie, and not proven to be one.**
 
 What was built so the next run proves it (`tensorpilot/divergence_probe.py`, tests in `tests/test_divergence_probe.py`):
 
-- the batch adapter has an off-by-default `margin_probe` that records the two best tokens and their logits at every emitted token;
+- the batch adapter has an off-by-default `margin_probe` that records the top-8 candidates and their logits at every emitted token (the token itself is always chosen by `argmax`, as in production);
 - the probe loads the model once, runs every prompt alone and then together through the same adapter the worker uses, and for each diverged request compares the two runs at the first
   differing token. A divergence is a **near-tie** only if both runs agree on the two candidates (each run's runner-up is the other run's choice) **and** each run's logit gap is at most
   4 units in the last place of the logit dtype at that magnitude (fp16: 2⁻¹⁰, bf16: 2⁻⁷ of the leading power of two). Anything else is `unexplained` and the probe exits non-zero;
@@ -181,6 +181,36 @@ What the gate does **not** settle:
   `PREFILL_PACK_TOKENS=0 scale_session.sh probe-0.5b` should reproduce request 21; it is the first stage of the 7B session.
 - **The Pod's image reference and Pod id were not recorded**: the entrypoint forwards only a fixed allow-list of variables to SSH sessions, so `TENSORPILOT_IMAGE_REF` (and `RUNPOD_POD_ID`) set in the Runpod
   console never reach `stage-info.json`. Export them in the SSH session before the first stage. The GPU UUID, which proves the physical card, was recorded.
+
+## 6b. The first complete 7B probe failed: investigation (2026-10-26, RTX 4090 UUID `GPU-54f095e0…`, image `v1.0.0-rc2-2`, archive sha256 `9bb3c1c5…eeb80`)
+
+`probe-7b` ran to the end this time (32 of 32 slots granted: the earlier pool fix worked) and exited 1: **15/32 identical, 13 near-ties, 4 unexplained**. The stress benchmarks never started, as designed.
+
+**What the archive shows.** All 17 diverged requests had logit gaps of 0 or 1 bf16 unit in the last place (0.03–0.125 absolute at these magnitudes) in both runs. Fourteen of the 17 had a gap of **exactly 0.0** in at least one run
+(an exact tie between the top two tokens). The four "unexplained" (requests 3, 22, 27, 31) were so labeled only because the two runs' runner-up tokens did not mirror each other; request 3 had exact ties in both runs. The probe recorded
+only the top two tokens, so the archive cannot say whether those were three-way ties.
+
+**Root cause of the failed gate: the probe, not the batching code.** Two defects in the diagnostic, both reproducible on a laptop:
+
+1. **The probe chose its token with `torch.topk`, production chooses with `torch.argmax`.** Among exactly equal logits `argmax` returns the lowest index; `topk`'s order is unspecified and depends on the tensor's shape. On CPU, on tie-heavy rows,
+   `topk`'s first index differed from `argmax`'s in **1,945 of 2,000** rows. bf16 logits are quantized to 0.0625–0.125 here, so exact ties are routine, and the probe was measuring its own tie-breaking at batch size 1 versus 32 rather than the engine's selection rule.
+   (The 0.5B gate-session probe had the same flaw; its single divergence was an exact tie.) The production path, with the probe off, always used `argmax`.
+2. **The classifier required the runner-ups to mirror each other.** In a three-way tie, which token is "second" is arbitrary, so a genuine tie was rejected.
+
+**What was ruled out, with evidence.** KV corruption, attention masks, position ids, slot compaction and packed-prefill padding were tested directly: with the model in float64 (rounding about 1e-16), every row at every step matches an independent full recompute by the Transformers
+model to **1.1e-16**, across bursts of mixed-length prompts (packed and unpacked), staggered arrivals with slot compaction, and long prompts chunked beside packed short ones (`tests/test_cuda_batch.py`, 32 tests on two architectures). Five mutations of the real code
+(positions off by one, a decode mask excluding the new token, the wrong last-token gather, packed rows written to the wrong slots, the skipped compaction copy) and a padding leak each make that test fail by many orders of magnitude. The packed path had previously been checked only by greedy-token equality, which a small perturbation can pass.
+So the batching logic is exact on CPU; what CPU cannot show is a bf16- or CUDA-kernel-specific effect.
+
+**What is not proven.** That the remaining GPU divergences are rounding and not a CUDA-specific defect. The evidence is consistent with rounding (every gap within one unit, no large-margin disagreement), but small systematic perturbations look like that too. The probe is rebuilt so the next run decides:
+
+- the token is chosen by `argmax` exactly as in production; the top-8 candidates are only recorded;
+- **cross-evaluation:** a divergence is a near-tie only if each run's own logits put the other run's choice within 4 units of its own (and each choice is in the other's top-8). This measures the closeness directly and handles three-way ties; for a two-way tie it is the same test as before. It is a change to the criterion, made because the old one rejected genuine ties, not to let defects through: a choice that is clearly behind in the other run's own logits is still unexplained;
+- **audit:** the diverged requests are replayed (the whole batched pass is repeated so the shapes recur; if any request's tokens differ the replay is reported non-deterministic and never passes), the full logit rows at the divergence step are kept from both runs, and a plain Transformers forward of the same
+  context is the independent reference. The batched logits must be no farther from it than the serial logits, plus the tie tolerance (4 units). A disturbance that leaves the choice unchanged but shifts the logits is caught by this and not by the tie test;
+- **tie exposure:** how many steps were within one unit of a tie, which is what makes bf16 divergences common.
+
+Nothing about the criteria for the 7B stages was weakened: the gate still requires zero unexplained divergences, now measured against the engine's real selection rule and an independent reference.
 
 ## 7. Exact commands (nothing below has been run)
 
