@@ -275,11 +275,19 @@ def main():
     parser.add_argument("--ready-timeout", type=float, default=600)
     parser.add_argument("--max-seconds", type=float, default=1800)
     parser.add_argument("--worker-arg", action="append", default=[], help="forwarded to tensorpilot.server")
+    parser.add_argument("--worker-command-json", help="supervise this exact command (a JSON list) instead of "
+                                                      "tensorpilot.server; used to test the harness itself")
     args = parser.parse_args()
     plan = build_spec_workload(json.loads(Path(args.workload_spec).read_text()), args.requests)
-    command = supervisor.build_command(SimpleNamespace(
-        host="127.0.0.1", port=args.port, execution=args.execution, batch_size=args.batch_size,
-        queue_size=args.queue_size, memory_gib=6, max_output_tokens=512, offline=False, worker_arg=args.worker_arg))
+    if args.worker_command_json:
+        command = json.loads(args.worker_command_json)
+        if not isinstance(command, list) or not command or not all(isinstance(word, str) for word in command):
+            parser.error("--worker-command-json must be a nonempty JSON list of strings")
+    else:
+        command = supervisor.build_command(SimpleNamespace(
+            host="127.0.0.1", port=args.port, execution=args.execution, batch_size=args.batch_size,
+            queue_size=args.queue_size, memory_gib=6, max_output_tokens=512, offline=False,
+            worker_arg=args.worker_arg))
     report = asyncio.run(run_fault_experiment(
         worker_command=command, url=args.url, api_key=os.environ.get("TENSORPILOT_API_KEY"),
         output_dir=args.output_dir, plan=plan, rate=args.rate, concurrency=args.concurrency,

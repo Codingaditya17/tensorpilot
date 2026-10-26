@@ -14,6 +14,7 @@ and the evidence collected so far is kept. Single-stream rates other than the me
 import argparse
 import json
 import math
+import shlex
 import sys
 from pathlib import Path
 
@@ -160,6 +161,57 @@ STAGES = {
 }
 
 
+# Stages that are not gpu_bench experiment files but run under the same cap, ledger and evidence rules.
+EXTRA_STAGES = {
+    "quality-7b": {"model": "7b", "engine": "quality", "quantization": "none", "dtype": "bfloat16",
+                   "expected_minutes": 14, "cap_minutes": 40,
+                   "what": "7B bf16 reference capture, then NF4 capture against it, then the comparison"},
+    "quality-14b": {"model": "14b", "engine": "quality", "quantization": "nf4", "dtype": "bfloat16",
+                    "expected_minutes": 12, "cap_minutes": 45,
+                    "what": "14B NF4 capture: absolute metrics only, there is no bf16 reference on 24 GB"},
+    "faults-0.5b": {"model": "0.5b", "engine": "faults", "quantization": "none", "dtype": "float16",
+                    "expected_minutes": 5, "cap_minutes": 20, "rate": 10, "requests": 300, "kill_after": 12,
+                    "what": "SIGKILL the worker under load and audit request accounting (fast restart)"},
+    "faults-7b": {"model": "7b", "engine": "faults", "quantization": "none", "dtype": "bfloat16",
+                  "expected_minutes": 12, "cap_minutes": 50, "rate": 5, "requests": 900, "kill_after": 25,
+                  "what": "the same crash experiment with a 7B reload in the recovery path"},
+}
+READY_TIMEOUT_S = {"0.5b": 900, "7b": 1800, "14b": 3600}
+DOWNLOAD_GIB = {"0.5b": 0.92, "7b": 14.19, "14b": 27.51}
+SPECS = {"short": SHORT, "mixed": MIXED, "cancel": CANCEL, "timeouts": TIMEOUTS}
+
+
+def all_stage_names():
+    return list(STAGES) + list(EXTRA_STAGES)
+
+
+def stage_env(stage):
+    """Everything the stage runner needs, from this one definition, as {NAME: value}."""
+    if stage in STAGES:
+        s, config = STAGES[stage], config_for(stage)
+        env = {"V10_ENGINE": s["engine"], "V10_EXECUTION": s["execution"], "V10_QUANT": s["quantization"],
+               "V10_DTYPE": s["dtype"], "V10_BATCH_SIZE": s["batch_size"], "V10_QUEUE_SIZE": s["queue_size"],
+               "V10_MAX_PROMPT_TOKENS": s["max_prompt_tokens"], "V10_CONFIG": f"benchmarks/gpu/v10-{stage}.json",
+               "V10_CAP_MINUTES": config["max_session_minutes"] - 5,
+               "V10_EXPECTED_MINUTES": config["expected_experiment_minutes"]}
+    elif stage in EXTRA_STAGES:
+        s = EXTRA_STAGES[stage]
+        env = {"V10_ENGINE": s["engine"], "V10_EXECUTION": "batch", "V10_QUANT": s["quantization"],
+               "V10_DTYPE": s["dtype"], "V10_BATCH_SIZE": 32, "V10_QUEUE_SIZE": 128, "V10_MAX_PROMPT_TOKENS": 1024,
+               "V10_CONFIG": "", "V10_CAP_MINUTES": s["cap_minutes"], "V10_EXPECTED_MINUTES": s["expected_minutes"],
+               "V10_WHAT": s["what"]}
+        for key in ("rate", "requests", "kill_after"):
+            if key in s:
+                env[f"V10_FAULT_{key.upper()}"] = s[key]
+    else:
+        raise KeyError(stage)
+    model = MODELS[s["model"]]
+    env.update(V10_STAGE=stage, V10_MODEL_KEY=s["model"], V10_MODEL_REPO=model["repo"],
+               V10_REVISION=model["revision"], V10_READY_TIMEOUT_S=READY_TIMEOUT_S[s["model"]],
+               V10_DOWNLOAD_GIB=DOWNLOAD_GIB[s["model"]])
+    return env
+
+
 def experiments_for(stage):
     s = STAGES[stage]
     model, execution = s["model"], s["execution"]
@@ -246,13 +298,12 @@ def render(config):
 def plan_text():
     lines = [f"{'stage':<16}{'experiments':>12}{'expected min':>14}{'hard cap min':>14}"]
     total_expected = total_cap = 0
-    for stage in STAGES:
-        config = config_for(stage)
-        expected = config["expected_experiment_minutes"]
-        cap = config["max_session_minutes"] - 5
-        total_expected += expected
-        total_cap += cap
-        lines.append(f"{stage:<16}{len(config['experiments']):>12}{expected:>14}{cap:>14}")
+    for stage in all_stage_names():
+        env = stage_env(stage)
+        count = len(config_for(stage)["experiments"]) if stage in STAGES else "-"
+        total_expected += env["V10_EXPECTED_MINUTES"]
+        total_cap += env["V10_CAP_MINUTES"]
+        lines.append(f"{stage:<16}{count:>12}{env['V10_EXPECTED_MINUTES']:>14}{env['V10_CAP_MINUTES']:>14}")
     lines.append(f"{'TOTAL':<16}{'':>12}{round(total_expected, 1):>14}{total_cap:>14}")
     return "\n".join(lines)
 
@@ -261,7 +312,25 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--write", metavar="DIR", help="write benchmarks/gpu/v10-<stage>.json for every stage")
     parser.add_argument("--plan", action="store_true", help="print expected and capped experiment minutes")
+    parser.add_argument("--list-stages", action="store_true", help="print stage names, one per line")
+    parser.add_argument("--stage-env", metavar="STAGE", help="print the stage's settings as shell exports")
+    parser.add_argument("--dump-spec", metavar="NAME", choices=sorted(SPECS), help="print a named workload spec as JSON")
     args = parser.parse_args()
+    if args.list_stages:
+        print("\n".join(all_stage_names()))
+        return 0
+    if args.stage_env:
+        try:
+            env = stage_env(args.stage_env)
+        except KeyError:
+            print(f"unknown stage {args.stage_env!r}; choose from: {', '.join(all_stage_names())}", file=sys.stderr)
+            return 2
+        for key, value in env.items():
+            print(f"export {key}={shlex.quote(str(value))}")
+        return 0
+    if args.dump_spec:
+        print(json.dumps(SPECS[args.dump_spec], indent=2))
+        return 0
     if args.write:
         directory = Path(args.write)
         directory.mkdir(parents=True, exist_ok=True)
