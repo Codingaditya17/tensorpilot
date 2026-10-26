@@ -104,7 +104,7 @@ def test_each_report_carries_window_telemetry_and_server_counters(evidence):
     directory, manifest = evidence
     report = load_report(directory, "sweep-c4", "repeat01_closed.json")
     window = report["telemetry"]
-    assert window["window_s"] > 0 and window["server_samples"] >= 1
+    assert window["window_s"] > 0 and window["server_samples"] >= 2, "a window always holds its two endpoints"
     assert window["active_sequences"] is not None and window["kv_rows_active"] is not None
     delta = report["server_counters_delta"]
     assert delta["tensorpilot_jobs_total{outcome=completed}"] > 0

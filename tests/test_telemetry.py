@@ -162,3 +162,35 @@ def test_stop_cancels_every_poller_and_closes_the_files(tmp_path):
 def test_a_nonpositive_interval_is_refused():
     with pytest.raises(ValueError, match="interval_s"):
         telemetry.Collector("x", interval_s=0)
+
+
+def test_sample_now_gives_a_window_shorter_than_the_interval_its_two_endpoints(tmp_path):
+    async def scenario():
+        async with TestServer(health_app([])) as server:
+            collector = telemetry.Collector(tmp_path / "t", url=str(server.make_url("")), interval_s=30,
+                                            executable=fake_smi(tmp_path, ROWS))
+            await collector.start()
+            await asyncio.sleep(0.8)  # the periodic loop has finished its first sample and will not take another
+            begin = collector.now()
+            await collector.sample_now()
+            await asyncio.sleep(0.05)
+            await collector.sample_now()
+            end = collector.now()
+            await collector.stop()
+            return collector.window(begin, end)
+
+    window = asyncio.run(scenario())
+    assert window["server_samples"] == 2 and window["gpu_samples"] == 2
+    assert window["gpu"]["0"]["utilization_gpu_pct"]["samples"] == 2
+
+
+def test_sample_now_without_a_gpu_or_server_does_nothing_and_does_not_fail(tmp_path):
+    async def scenario():
+        collector = telemetry.Collector(tmp_path / "t", interval_s=30, gpu=False)
+        await collector.start()
+        await collector.sample_now()
+        await collector.stop()
+        return collector
+
+    collector = asyncio.run(scenario())
+    assert not collector.gpu_samples and not collector.server_samples

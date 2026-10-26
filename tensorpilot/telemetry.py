@@ -114,6 +114,7 @@ class Collector:
         self._tasks = []
         self._origin = None
         self._files = {}
+        self._session = None
 
     # ----- lifecycle --------------------------------------------------------------------------------
     async def start(self):
@@ -121,14 +122,16 @@ class Collector:
         self._files = {name: (self.directory / f"{name}.jsonl").open("w", encoding="utf-8")
                        for name in ("gpu", "server", "events")}
         self._origin = time.monotonic()
+        if self.url:
+            self._session = self.session_factory(headers=self.headers, timeout=aiohttp.ClientTimeout(total=5))
         if self.gpu:
             if shutil.which(self.executable) is None:
                 self.gpu_status = "unavailable: nvidia-smi not found"
             else:
                 self.gpu_status = "sampling"
-                self._tasks.append(asyncio.create_task(self._poll_gpu(), name="tensorpilot-telemetry-gpu"))
+                self._tasks.append(asyncio.create_task(self._loop(self._gpu_once), name="tensorpilot-telemetry-gpu"))
         if self.url:
-            self._tasks.append(asyncio.create_task(self._poll_server(), name="tensorpilot-telemetry-server"))
+            self._tasks.append(asyncio.create_task(self._loop(self._server_once), name="tensorpilot-telemetry-server"))
         self.mark("collector_started", interval_s=self.interval_s, gpu_status=self.gpu_status)
         return self
 
@@ -137,6 +140,8 @@ class Collector:
         for task in self._tasks:
             task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
+        if self._session is not None:
+            await self._session.close()
         for handle in self._files.values():
             handle.close()
         return self.overhead()
@@ -146,6 +151,17 @@ class Collector:
 
     async def __aexit__(self, *exc):
         await self.stop()
+
+    async def sample_now(self):
+        """Take one GPU and one server sample immediately.
+
+        Called at experiment window boundaries so even a window shorter than the sampling interval holds at least
+        its two endpoints, instead of a summary built from zero samples.
+        """
+        once = [self._server_once()] if self.url else []
+        if self.gpu_status == "sampling":
+            once.append(self._gpu_once())
+        await asyncio.gather(*once)
 
     # ----- recording --------------------------------------------------------------------------------
     def now(self):
@@ -161,50 +177,51 @@ class Collector:
         self.events.append(self._write("events", {"event": label, **fields}))
         return self.events[-1]
 
-    async def _poll_gpu(self):
+    async def _loop(self, once):
         while True:
             began = time.perf_counter()
-            process = None
-            try:
-                process = await asyncio.create_subprocess_exec(
-                    self.executable, f"--query-gpu={GPU_QUERY}", "--format=csv,noheader,nounits",
-                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-                out, _ = await asyncio.wait_for(process.communicate(), 5)
-                if process.returncode != 0:
-                    raise RuntimeError(f"nvidia-smi exited {process.returncode}")
-                took = time.perf_counter() - began
-                self.gpu_call_s.append(took)
-                for device in parse_gpu_csv(out.decode()):
-                    self.gpu_samples.append(self._write("gpu", {**device, "call_s": round(took, 4)}))
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                self.gpu_errors += 1
-                self._write("gpu", {"error": type(error).__name__})
-            finally:
-                # A poll cancelled or timed out mid-flight must not leave its child process behind.
-                if process is not None and process.returncode is None:
-                    process.kill()
-                    await asyncio.shield(process.wait())
+            await once()
             await asyncio.sleep(max(0, self.interval_s - (time.perf_counter() - began)))
 
-    async def _poll_server(self):
-        async with self.session_factory(headers=self.headers, timeout=aiohttp.ClientTimeout(total=5)) as session:
-            while True:
-                began = time.perf_counter()
-                try:
-                    async with session.get(self.url + "/health") as response:
-                        response.raise_for_status()
-                        health = await response.json()
-                    took = time.perf_counter() - began
-                    self.server_call_s.append(took)
-                    self.server_samples.append(self._write("server", {**server_view(health), "call_s": round(took, 4)}))
-                except asyncio.CancelledError:
-                    raise
-                except Exception as error:
-                    self.server_errors += 1
-                    self._write("server", {"error": type(error).__name__})
-                await asyncio.sleep(max(0, self.interval_s - (time.perf_counter() - began)))
+    async def _gpu_once(self):
+        began = time.perf_counter()
+        process = None
+        try:
+            process = await asyncio.create_subprocess_exec(
+                self.executable, f"--query-gpu={GPU_QUERY}", "--format=csv,noheader,nounits",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            out, _ = await asyncio.wait_for(process.communicate(), 5)
+            if process.returncode != 0:
+                raise RuntimeError(f"nvidia-smi exited {process.returncode}")
+            took = time.perf_counter() - began
+            self.gpu_call_s.append(took)
+            for device in parse_gpu_csv(out.decode()):
+                self.gpu_samples.append(self._write("gpu", {**device, "call_s": round(took, 4)}))
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self.gpu_errors += 1
+            self._write("gpu", {"error": type(error).__name__})
+        finally:
+            # A poll cancelled or timed out mid-flight must not leave its child process behind.
+            if process is not None and process.returncode is None:
+                process.kill()
+                await asyncio.shield(process.wait())
+
+    async def _server_once(self):
+        began = time.perf_counter()
+        try:
+            async with self._session.get(self.url + "/health") as response:
+                response.raise_for_status()
+                health = await response.json()
+            took = time.perf_counter() - began
+            self.server_call_s.append(took)
+            self.server_samples.append(self._write("server", {**server_view(health), "call_s": round(took, 4)}))
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self.server_errors += 1
+            self._write("server", {"error": type(error).__name__})
 
     # ----- summaries --------------------------------------------------------------------------------
     def overhead(self):

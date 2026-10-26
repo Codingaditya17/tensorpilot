@@ -359,8 +359,10 @@ async def run_experiment(config, experiment, *, url, output_dir, config_sha256, 
                 args = _namespace(url, plan_path, journal, requests=len(plan), concurrency=concurrency,
                                   rate=rate, max_tokens=max_tokens, timeout=timeout, **extras)
                 counters_before = await scrape_counters(url, api_key)
-                window_start = collector.now() if collector else None
+                window_start = None
                 if collector:
+                    window_start = collector.now()
+                    await collector.sample_now()
                     collector.mark(f"{name}_start")
                 try:
                     result = await asyncio.wait_for(load.run(args), remaining)
@@ -370,6 +372,7 @@ async def run_experiment(config, experiment, *, url, output_dir, config_sha256, 
                         collector.mark(f"{name}_aborted", reason="time_cap")
                     break
                 if collector:
+                    await collector.sample_now()
                     collector.mark(f"{name}_end")
                     result["telemetry"] = collector.window(window_start, collector.now())
                 result["server_counters_delta"] = counter_delta(counters_before, await scrape_counters(url, api_key))
