@@ -142,6 +142,9 @@ def test_the_stage_order_and_budget_match_the_plan():
     assert [m for m in re.findall(r"^run (\S+)$", text, re.M)] == plan["stages"]
 
 
+DOC = ROOT / "docs" / "v10-7b-results.md"
+
+
+@pytest.mark.skipif(not DOC.exists(), reason="the image test job mounts tests, deploy and benchmarks, not docs")
 def test_the_copy_in_the_document_is_the_script():
-    text = (ROOT / "docs" / "v10-7b-results.md").read_text()
-    assert SCRIPT.read_text().strip() in text
+    assert SCRIPT.read_text().strip() in DOC.read_text()
