@@ -89,7 +89,7 @@ Treat the vLLM start-up fix as **unproven on a GPU until the next run reports**.
 
 ## 7. The next run
 
-Image: see the pinned digest in the script below. Pod: 1 × RTX 4090, driver 580+, TCP 22, container disk 50 GB, volume 120 GB, RAM ≥ 31 GB, `TENSORPILOT_POD_MAX_MINUTES=165`.
+Image: `ghcr.io/codingaditya17/tensorpilot/cuda-experiment@sha256:25908f3ae3a51f7d2c3cc54be5ba50583e8ad8277b95a784ba9b69b3abfdd644` (v1.0.0-rc2-6, revision 0f4f665; an rc2-5 tag exists on GitHub but its image job failed before publishing, so no rc2-5 image exists). Pod: 1 × RTX 4090, driver 580+, TCP 22, container disk 50 GB, volume 120 GB, RAM ≥ 31 GB, `TENSORPILOT_POD_MAX_MINUTES=165`.
 
 At $0.91/h (`python -m tensorpilot.suite --rerun-budget --price-per-hour 0.91`): ledger budget 97 minutes, expected total about 109 minutes, **about $1.65**; worst case 147 minutes, **about $2.23**. Fail-fast points and what each costs:
 the toolchain check (seconds), the install with its GPU smokes (about 15–20 minutes of install, then the sm_89 FlashInfer compile, 1–3 minutes on the Pod's CPUs), then the 0.5B startup stage (cap 12 minutes, expected 4).
@@ -119,7 +119,7 @@ Copy the archives, `ledger.jsonl` and `rerun.log` before terminating the Pod.
 set -Eeuo pipefail
 
 # The digest of the published image that carries gcc, libc6-dev and the CUDA_HOME assembly (v1.0.0-rc2-6). The script refuses to run until it is pinned.
-EXPECTED_DIGEST="sha256:UNSET-pin-the-published-rc2-6-digest-here"
+EXPECTED_DIGEST="sha256:25908f3ae3a51f7d2c3cc54be5ba50583e8ad8277b95a784ba9b69b3abfdd644"
 STAGE="startup"
 trap 'echo >&2; echo "*** STOPPED at: ${STAGE}. Evidence for every stage that ran, including this one, is archived under ${SESSION:-the session directory}." >&2; echo "*** THE POD IS STILL BILLING: copy the evidence, then TERMINATE the Pod." >&2' ERR
 

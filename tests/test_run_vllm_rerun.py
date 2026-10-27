@@ -102,9 +102,11 @@ def test_a_missing_compiler_stops_the_session_before_the_install_or_any_download
     assert calls(pod) == ["check_toolchain"] and "STOPPED at: toolchain check" in done.stderr
 
 
-def test_the_committed_script_refuses_until_an_image_digest_is_pinned(pod):
-    done = run(pod, script=SCRIPT)
-    assert done.returncode == 2 and "no image digest pinned" in done.stderr and calls(pod) == []
+def test_the_committed_script_is_pinned_to_the_published_rc2_6_digest_and_refuses_any_other(pod):
+    assert "sha256:25908f3ae3a51f7d2c3cc54be5ba50583e8ad8277b95a784ba9b69b3abfdd644" in SCRIPT.read_text()
+    done = run(pod, script=SCRIPT)           # the fixture's image reference ends in a different digest
+    assert done.returncode == 2 and "TENSORPILOT_IMAGE_REF must end in @sha256:25908f3ae3a51f7d2c3cc54be5ba50583e8ad8277b95a784ba9b69b3abfdd644" in done.stderr and calls(pod) == []
+    assert re.search(r'EXPECTED_DIGEST="sha256:[0-9a-f]{64}"', SCRIPT.read_text())
 
 
 @pytest.mark.parametrize("change", [{"TENSORPILOT_IMAGE_REF": "ghcr.io/x/cuda-experiment:v1.0.0-rc2-3"},
