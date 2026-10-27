@@ -10,9 +10,11 @@ FROM ${BASE}
 # process runs as the unprivileged tensorpilot user after an SSH login.
 # hadolint ignore=DL3002,DL3066
 USER root
+# gcc and libc6-dev are for vLLM, not TensorPilot: its torch.compile path has Triton build a CUDA helper module with the system C
+# compiler, and the slim base has neither a compiler nor libc headers (v1.0.0-rc2-3 lost its vLLM stage to exactly that).
 # hadolint ignore=DL3008
 RUN apt-get update \
- && apt-get install -y --no-install-recommends openssh-server curl ca-certificates procps less tmux \
+ && apt-get install -y --no-install-recommends openssh-server curl ca-certificates procps less tmux gcc libc6-dev \
  && rm -rf /var/lib/apt/lists/* \
  && mkdir -p /run/sshd \
  && usermod --shell /bin/bash --password '*' tensorpilot

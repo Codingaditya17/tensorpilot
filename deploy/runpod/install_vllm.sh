@@ -8,10 +8,14 @@
 # torch 2.9.1 (CUDA 12.8) and transformers 5.20.1. That is why it gets its own virtualenv and is never installed into
 # the system Python. The CUDA 13.0 runtime needs a Linux driver of 580 or newer.
 #
+# vLLM's torch.compile path needs a C compiler (Triton builds a helper module with it). check_toolchain.sh proves that before the
+# download, and again with a real GPU kernel once the environment exists; the 7B session lost its vLLM stage to this once.
+#
 # This downloads several gigabytes and is billed Pod time; it is bounded by INSTALL_TIMEOUT (default 40m).
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 VENV="${VLLM_VENV:-/workspace/vllm-venv}"
 LOCK="$REPO_ROOT/requirements-vllm.txt"
 TIMEOUT="${INSTALL_TIMEOUT:-40m}"
@@ -25,13 +29,18 @@ die() { echo "install_vllm: $*" >&2; exit 2; }
 PINS="$(grep -cE '^[A-Za-z0-9_.-]+==' "$LOCK")"
 
 if [[ "${1:-}" == "--plan" ]]; then
+  toolchain_ok=0
+  toolchain="$("$HERE/check_toolchain.sh" 2>&1)" && toolchain_ok=1
+  toolchain_line="$(tail -n 1 <<<"$toolchain")"
   cat <<PLAN
 venv:        $VENV (isolated; the system Python is not touched)
 lock:        $LOCK ($PINS pinned packages, every one hash-verified, installed with --no-deps)
 expects:     vllm $EXPECT_VLLM with torch $EXPECT_TORCH (CUDA 13.0 runtime, driver 580 or newer)
 disk:        about 15 GiB for the venv; refuses below $NEED_FREE_GIB GiB free
+toolchain:   $toolchain_line
 time bound:  $TIMEOUT (billed Pod time)
 PLAN
+  (( toolchain_ok )) || exit 2
   exit 0
 fi
 
@@ -40,6 +49,7 @@ if [[ "${V10_SKIP_GPU_CHECKS:-}" != "1" ]]; then
   driver="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1)"
   (( ${driver%%.*} >= 580 )) || die "the CUDA 13.0 runtime needs driver 580 or newer; this host has $driver"
 fi
+"$HERE/check_toolchain.sh"
 mkdir -p "$(dirname "$VENV")"
 free_gib=$(( $(df -Pk "$(dirname "$VENV")" | awk 'NR==2 {print $4}') / 1024 / 1024 ))
 (( free_gib >= NEED_FREE_GIB )) || die "only ${free_gib} GiB free at $(dirname "$VENV"); need $NEED_FREE_GIB"
@@ -57,5 +67,6 @@ PY
 [[ "$vllm" == "$EXPECT_VLLM" && "$torch" == "$EXPECT_TORCH" ]] || die "installed vllm $vllm / torch $torch, expected $EXPECT_VLLM / $EXPECT_TORCH"
 if [[ "${V10_SKIP_GPU_CHECKS:-}" != "1" ]]; then
   "$VENV/bin/python" -c "import torch; assert torch.cuda.is_available(), 'CUDA is not visible to the vLLM environment'"
+  "$HERE/check_toolchain.sh" --gpu "$VENV/bin/python"
 fi
 echo "vllm $vllm with torch $torch installed in $VENV" | tee "$VENV/INSTALL-OK"

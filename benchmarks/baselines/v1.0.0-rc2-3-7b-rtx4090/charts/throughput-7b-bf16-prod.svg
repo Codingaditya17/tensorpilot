@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 420" width="760" height="420" role="img" aria-labelledby="t d"><style>:root{--surface:#fcfcfb;--text:#0b0b0b;--muted:#52514e;--grid:#e3e2de;--s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a}@media (prefers-color-scheme: dark){:root{--surface:#1a1a19;--text:#f0efec;--muted:#c3c2b7;--grid:#34332f;--s1:#3987e5;--s2:#d95926;--s3:#199e70}}text{font:12px system-ui,sans-serif;fill:var(--text)}.m{fill:var(--muted)}.t{font-size:14px;font-weight:600}</style><title id="t">Output tokens/s (wall clock): 7b-bf16-prod</title>
+<desc id="d">Output tokens/s (wall clock) against concurrent clients for 7b-bf16-prod, active window. The same numbers are in the table below the chart.</desc>
+<rect width="760" height="420" fill="var(--surface)"/>
+<text class="t" x="76" y="24">Output tokens/s (wall clock): 7b-bf16-prod</text>
+<text class="m" x="76" y="42">hollow marker = fewer than 100 completed requests</text>
+<line x1="76" x2="590" y1="358.0" y2="358.0" stroke="var(--grid)" stroke-width="1"/><text class="m" x="68" y="362.0" text-anchor="end">0</text>
+<line x1="76" x2="590" y1="307.7" y2="307.7" stroke="var(--grid)" stroke-width="1"/><text class="m" x="68" y="311.7" text-anchor="end">200</text>
+<line x1="76" x2="590" y1="257.3" y2="257.3" stroke="var(--grid)" stroke-width="1"/><text class="m" x="68" y="261.3" text-anchor="end">400</text>
+<line x1="76" x2="590" y1="207.0" y2="207.0" stroke="var(--grid)" stroke-width="1"/><text class="m" x="68" y="211.0" text-anchor="end">600</text>
+<line x1="76" x2="590" y1="156.7" y2="156.7" stroke="var(--grid)" stroke-width="1"/><text class="m" x="68" y="160.7" text-anchor="end">800</text>
+<line x1="76" x2="590" y1="106.3" y2="106.3" stroke="var(--grid)" stroke-width="1"/><text class="m" x="68" y="110.3" text-anchor="end">1000</text>
+<line x1="76" x2="590" y1="56.0" y2="56.0" stroke="var(--grid)" stroke-width="1"/><text class="m" x="68" y="60.0" text-anchor="end">1200</text>
+<text class="m" x="76.0" y="376" text-anchor="middle">1</text>
+<text class="m" x="333.0" y="376" text-anchor="middle">32</text>
+<text class="m" x="384.4" y="376" text-anchor="middle">64</text>
+<text class="m" x="435.8" y="376" text-anchor="middle">128</text>
+<text class="m" x="487.2" y="376" text-anchor="middle">256</text>
+<text class="m" x="538.6" y="376" text-anchor="middle">512</text>
+<text class="m" x="590.0" y="376" text-anchor="middle">1024</text>
+<text class="m" x="333" y="406" text-anchor="middle">concurrent clients</text><text class="m" x="14" y="207" transform="rotate(-90 14 207)" text-anchor="middle">Output tokens/s (wall clock)</text>
+<polyline fill="none" stroke="var(--s1)" stroke-width="2" points="76.0,344.9 333.0,150.9 384.4,104.7 435.8,104.9 487.2,103.2 538.6,102.9 590.0,103.8"/>
+<circle cx="76.0" cy="344.9" r="4.5" fill="var(--surface)" stroke="var(--s1)" stroke-width="2"/>
+<circle cx="333.0" cy="150.9" r="4.5" fill="var(--s1)" stroke="var(--s1)" stroke-width="2"/>
+<circle cx="384.4" cy="104.7" r="4.5" fill="var(--s1)" stroke="var(--s1)" stroke-width="2"/>
+<circle cx="435.8" cy="104.9" r="4.5" fill="var(--s1)" stroke="var(--s1)" stroke-width="2"/>
+<circle cx="487.2" cy="103.2" r="4.5" fill="var(--s1)" stroke="var(--s1)" stroke-width="2"/>
+<circle cx="538.6" cy="102.9" r="4.5" fill="var(--s1)" stroke="var(--s1)" stroke-width="2"/>
+<circle cx="590.0" cy="103.8" r="4.5" fill="var(--s1)" stroke="var(--s1)" stroke-width="2"/>
+<text x="600.0" y="107.8">7b-bf16-prod</text>
+<line x1="604" x2="624" y1="64" y2="64" stroke="var(--s1)" stroke-width="2"/><text x="630" y="68">7b-bf16-prod</text>
+<polyline fill="none" stroke="var(--s2)" stroke-width="2" points="76.0,344.9 333.0,150.8 384.4,104.5 435.8,104.7 487.2,103.0 538.6,102.6 590.0,103.0"/>
+<circle cx="76.0" cy="344.9" r="4.5" fill="var(--surface)" stroke="var(--s2)" stroke-width="2"/>
+<circle cx="333.0" cy="150.8" r="4.5" fill="var(--s2)" stroke="var(--s2)" stroke-width="2"/>
+<circle cx="384.4" cy="104.5" r="4.5" fill="var(--s2)" stroke="var(--s2)" stroke-width="2"/>
+<circle cx="435.8" cy="104.7" r="4.5" fill="var(--s2)" stroke="var(--s2)" stroke-width="2"/>
+<circle cx="487.2" cy="103.0" r="4.5" fill="var(--s2)" stroke="var(--s2)" stroke-width="2"/>
+<circle cx="538.6" cy="102.6" r="4.5" fill="var(--s2)" stroke="var(--s2)" stroke-width="2"/>
+<circle cx="590.0" cy="103.0" r="4.5" fill="var(--s2)" stroke="var(--s2)" stroke-width="2"/>
+<text x="600.0" y="107.0">active window</text>
+<line x1="604" x2="624" y1="82" y2="82" stroke="var(--s2)" stroke-width="2"/><text x="630" y="86">active window</text>
+</svg>

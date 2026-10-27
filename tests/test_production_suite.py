@@ -110,3 +110,47 @@ def test_total_planned_requests_clear_ten_thousand_by_a_wide_margin():
         for e in suite.config_for(stage)["experiments"]:
             total += e["requests"] * e.get("repeats", 1) * (len(e["rates"]) if "rates" in e else 1)
     assert total > 15_000
+
+
+# ----- the lean re-run of the vLLM comparison (the 7B session's vLLM stage failed to start) -----
+
+LEAN = [("7b-bf16-cmp", "7b-bf16-prod"), ("vllm-7b-bf16-cmp", "vllm-7b-bf16-prod")]
+
+
+@pytest.mark.parametrize("lean, parent", LEAN)
+def test_a_lean_stage_copies_the_prod_experiments_unchanged(lean, parent):
+    """Identical definitions mean identical workload hashes, so archived -prod runs and re-run lean runs pair directly."""
+    full = {e["id"]: e for e in suite.config_for(parent)["experiments"]}
+    kept = suite.config_for(lean)["experiments"]
+    assert kept and all(e == full[e["id"]] for e in kept)
+    assert suite.config_for(lean)["target"] == {**suite.config_for(parent)["target"]}
+
+
+@pytest.mark.parametrize("lean", ["7b-bf16-cmp", "vllm-7b-bf16-cmp"])
+def test_a_lean_stage_has_every_comparison_point_the_acceptance_criteria_name_with_enough_repeats(lean):
+    import json
+    from pathlib import Path
+    criteria = json.loads((Path(__file__).resolve().parents[1] / "benchmarks" / "acceptance" / "criteria.json").read_text())
+    by_id = {e["id"]: e for e in suite.config_for(lean)["experiments"]}
+    for point in criteria["vllm"]["points"]:
+        assert point in by_id and by_id[point].get("repeats", 1) >= criteria["vllm"]["min_repeats"], point
+
+
+def test_the_lean_vllm_stage_adds_the_plateau_points_and_nothing_tensorpilot_only():
+    ids = {e["id"] for e in suite.config_for("vllm-7b-bf16-cmp")["experiments"]}
+    assert {"scale-c64", "scale-c256", "scale-c1024"} <= ids
+    assert not ids & {"cancellation", "timeouts", "overload", "recovery-after-overload"}
+    assert suite.stage_env("vllm-7b-bf16-cmp")["V10_ENGINE"] == "vllm"
+    assert suite.STAGES["vllm-7b-bf16-cmp"]["batch_size"] == suite.STAGES["7b-bf16-prod"]["batch_size"], "same 48 sequences"
+
+
+def test_the_rerun_session_is_cheap_enough_to_fit_a_three_dollar_balance_at_the_measured_price():
+    plan = suite.budget_plan(0.91, 3.0, suite.RERUN_SESSIONS)
+    row = plan["sessions"]["7b-vllm-rerun"]
+    assert row["stages"] == ["vllm-7b-bf16-cmp", "7b-bf16-cmp", "quality-7b"], "vLLM first: it is the one that failed"
+    assert plan["fits_budget_worst_case"] and plan["every_expected_stage_can_start"]
+    assert row["worst_cost_usd"] < 2.2 and row["expected_cost_usd"] < 1.6
+
+
+def test_the_core_sessions_are_unchanged_by_the_rerun_definitions():
+    assert set(suite.SESSIONS) == {"gate", "7b", "14b"}

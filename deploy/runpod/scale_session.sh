@@ -268,16 +268,26 @@ vllm_guards() {
   local python help
   python="$(vllm_python)"
   [[ -x "$python" ]] || die "vLLM is not installed: run deploy/runpod/install_vllm.sh first"
+  # vLLM's torch.compile builds Triton kernels with the system C compiler. A missing compiler used to surface only after the model
+  # loaded, minutes into the stage; this launches one real kernel first, in seconds.
+  local -a toolchain=("$REPO_ROOT/deploy/runpod/check_toolchain.sh")
+  skip_gpu || toolchain+=(--gpu)
+  "${toolchain[@]}" "$python" >"$STAGE_DIR/toolchain.txt" 2>&1 || { cat "$STAGE_DIR/toolchain.txt" >&2; die "the vLLM toolchain check failed (see toolchain.txt)"; }
   help="$("$python" -m vllm.entrypoints.openai.api_server --help=all 2>&1)" || die "vLLM could not print its help"
   echo "$help" >"$STAGE_DIR/vllm-help.txt"
   grep -q -- "--generation-config" <<<"$help" ||
     die "this vLLM build has no --generation-config; without it the model's own sampling defaults would leak in"
+  grep -q -- "--no-enable-prefix-caching" <<<"$help" ||
+    die "this vLLM build has no --no-enable-prefix-caching; replayed prompts would hit its prefix cache and inflate the comparison"
   if [[ "$V10_QUANT" == "nf4" ]]; then
     grep -q "bitsandbytes" <<<"$help" || die "this vLLM build does not list bitsandbytes quantization"
   fi
   "$python" -m pip freeze >"$STAGE_DIR/vllm-env.txt" 2>&1 || true
 }
 
+# --no-enable-prefix-caching: every experiment repeat replays the same prompts (same workload hash), which would hit vLLM's automatic
+# prefix cache from the second repeat on and measure cache hits, not engine speed. TensorPilot has no prefix cache; this keeps the
+# comparison to the work each engine actually does on a prompt. (vLLM with its shipped defaults is a different measurement.)
 engine_command_vllm() {
   if [[ $TEST_MODE -eq 1 && -n "${V10_VLLM_CMD:-}" ]]; then
     # shellcheck disable=SC2086
@@ -288,7 +298,7 @@ engine_command_vllm() {
                     --revision "$V10_REVISION" --served-model-name "$V10_MODEL_REPO" --download-dir "$CACHE"
                     --dtype "$V10_DTYPE" --max-model-len "$((V10_MAX_PROMPT_TOKENS + 512))"
                     --max-num-seqs "$V10_BATCH_SIZE" --gpu-memory-utilization 0.90 --host 127.0.0.1
-                    --port "$PORT" --generation-config vllm)
+                    --port "$PORT" --generation-config vllm --no-enable-prefix-caching)
   [[ "$V10_QUANT" == "nf4" ]] && command+=(--quantization bitsandbytes --load-format bitsandbytes)
   printf '%s\n' "${command[@]}"
 }

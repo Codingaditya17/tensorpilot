@@ -605,9 +605,18 @@ def _gpu_vram_mib(reports):
     return max(values) if values else None
 
 
+def vllm_pair_7b(session):
+    """Which TensorPilot stage vLLM is compared with. A lean re-run (vllm-7b-bf16-cmp) is paired with the TensorPilot control that ran
+    on the same Pod and card (7b-bf16-cmp); without that control it falls back to the archived 7b-bf16-prod, and the same-hardware
+    item then reports, truthfully, that the two engines did not share a card."""
+    if "vllm-7b-bf16-prod" not in session and "vllm-7b-bf16-cmp" in session:
+        return ("7b-bf16-cmp" if "7b-bf16-cmp" in session else "7b-bf16-prod", "vllm-7b-bf16-cmp", "7b")
+    return ("7b-bf16-prod", "vllm-7b-bf16-prod", "7b")
+
+
 def check_vllm(session, criteria):
     out = []
-    pairs = [("7b-bf16-prod", "vllm-7b-bf16-prod", "7b")]
+    pairs = [vllm_pair_7b(session)]
     if "vllm-14b-nf4-prod" in session:
         pairs.append(("14b-nf4-prod", "vllm-14b-nf4-prod", "14b"))
     title_hw = "vLLM and TensorPilot ran on the same physical GPU, model revision and precision"
@@ -625,6 +634,11 @@ def check_vllm(session, criteria):
         same_model = all(ta.get(k) == tb.get(k) for k in ("model", "revision", "dtype", "quantization"))
         if not a or not b or not a.get("gpus") or not b.get("gpus"):
             status, detail = INCONCLUSIVE, "stage-info.json with GPU UUIDs is missing, so one physical card cannot be proven"
+        elif not tb or not ta:
+            # A stage that failed before its first request (vLLM's engine never started) has a stage-info.json but no benchmark
+            # manifest. That is a missing comparison, not a model or hardware mismatch.
+            missing_stage = vl_name if not tb else tp_name
+            status, detail = INCONCLUSIVE, f"{missing_stage} has no benchmark manifest (it produced no measurements), so nothing was compared"
         else:
             uuids = ({g["uuid"] for g in a["gpus"]}, {g["uuid"] for g in b["gpus"]})
             pods = (a.get("environment", {}).get("RUNPOD_POD_ID"), b.get("environment", {}).get("RUNPOD_POD_ID"))

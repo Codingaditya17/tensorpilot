@@ -1,0 +1,566 @@
+{
+  "schema": "tensorpilot.acceptance/v1",
+  "at_utc": "2026-10-27T01:45:30.991755+00:00",
+  "criteria_sha256": "6882c2d01b3fadfc652dda0fa6101a8138c993e5cd745db6f2bdb98e924731e6",
+  "evaluation": "FAIL",
+  "performance": "INCONCLUSIVE",
+  "counts": {
+    "PASS": 17,
+    "FAIL": 1,
+    "INCONCLUSIVE": 13
+  },
+  "rule": "PASS only if every gate criterion passes; any gate FAIL is FAIL; otherwise missing evidence is INCONCLUSIVE. Performance targets are reported separately and never change the evaluation verdict.",
+  "items": [
+    {
+      "id": "1.loads-and-generates-7B BF16",
+      "criterion": 1,
+      "title": "7B BF16 loads and generates on a real GPU",
+      "category": "correctness",
+      "status": "PASS",
+      "detail": "preflight ready=True, smoke 5 completed, 19381 benchmark requests completed, CUDA device seen=True",
+      "measured": {
+        "smoke_completed": 5,
+        "benchmark_completed": 19381
+      }
+    },
+    {
+      "id": "1.loads-and-generates-14B NF4",
+      "criterion": 1,
+      "title": "14B NF4 loads and generates on a real GPU",
+      "category": "correctness",
+      "status": "INCONCLUSIVE",
+      "detail": "stage 14b-nf4-prod was not found in the evidence",
+      "measured": {}
+    },
+    {
+      "id": "1.protocol-valid",
+      "criterion": 1,
+      "title": "At least 99.9% protocol-valid responses",
+      "category": "correctness",
+      "status": "PASS",
+      "detail": "20037 of 20037 responses were protocol-valid (1.00000, need 0.999); cancelled, rejected and timed-out requests are not responses to validate",
+      "measured": {
+        "responses": 20037,
+        "invalid": 0,
+        "fraction": 1.0
+      }
+    },
+    {
+      "id": "1.no-truncation-duplicates-or-lost-requests",
+      "criterion": 1,
+      "title": "Zero silent truncation, duplicate completions or unaccounted requests",
+      "category": "correctness",
+      "status": "PASS",
+      "detail": "20568 requests across 46 runs: 0 truncated, 0 duplicated, 0 unaccounted",
+      "measured": {
+        "requests": 20568,
+        "truncated": 0,
+        "duplicated": 0,
+        "unaccounted": 0
+      }
+    },
+    {
+      "id": "1.exact-match-7b-bf16",
+      "criterion": 1,
+      "title": "7B BF16 batched output equals solo output, or every divergence is explained",
+      "category": "correctness",
+      "status": "PASS",
+      "detail": "exact-match fractions {'together_vs_solo': 0.625, 'staggered_vs_solo': 0.625}; every diverged request [0, 6, 7, 11, 12, 13, 14, 18, 20, 23, 28, 31] was reproduced by the probe (packing 512) and is a rounding-level near-tie (documented numerical divergence)",
+      "measured": {
+        "together_vs_solo": 0.625,
+        "staggered_vs_solo": 0.625,
+        "explained": [
+          0,
+          6,
+          7,
+          11,
+          12,
+          13,
+          14,
+          18,
+          20,
+          23,
+          28,
+          31
+        ]
+      }
+    },
+    {
+      "id": "1.quick-session-divergence-explained",
+      "criterion": 1,
+      "title": "The quick session's 31/32 divergence is explained with logits",
+      "category": "correctness",
+      "status": "INCONCLUSIVE",
+      "detail": "no invariance.json in 0.5b-quick-batch: the batch-invariance check did not run or did not complete",
+      "measured": {}
+    },
+    {
+      "id": "1.nf4-fidelity-7b",
+      "criterion": 1,
+      "title": "NF4 7B fidelity against the bf16 reference meets the declared threshold",
+      "category": "correctness",
+      "status": "INCONCLUSIVE",
+      "detail": "quality-7b comparison.json was not found in the evidence",
+      "measured": {}
+    },
+    {
+      "id": "1.nf4-fidelity-14b",
+      "criterion": 1,
+      "title": "NF4 14B is at least as good as the 7B bf16 reference on the same text",
+      "category": "correctness",
+      "status": "INCONCLUSIVE",
+      "detail": "quality-14b/nf4-absolute.json and quality-7b/reference-bf16.json was not found in the evidence",
+      "measured": {}
+    },
+    {
+      "id": "2.concurrency-levels-7b",
+      "criterion": 2,
+      "title": "Throughput and latency reported at every concurrency level (7b)",
+      "category": "completeness",
+      "status": "PASS",
+      "detail": "all seven levels were measured and reported (rejections and timeouts included, not required to be absent)",
+      "measured": {
+        "levels": {
+          "1": {
+            "successful_requests_per_s": 0.6116440147827398,
+            "completed_output_tokens_per_s": 52.08148785875029,
+            "p50_client_latency_s": 0.959881879738532,
+            "p95_client_latency_s": 3.8765135650930462,
+            "p99_client_latency_s": 5.335993694614734,
+            "p50_client_ttft_s": 0.02332117676269263,
+            "p95_client_ttft_s": 0.0882533281459473,
+            "p99_client_ttft_s": 0.10898530587379354,
+            "error_rate": 0.0,
+            "rejection_rate": 0.0,
+            "p95_dispatch_lag_s": 0.00011918128002434965
+          },
+          "32": {
+            "successful_requests_per_s": 9.581990729494269,
+            "completed_output_tokens_per_s": 822.8758118736893,
+            "p50_client_latency_s": 2.1268515704432502,
+            "p95_client_latency_s": 8.217019175755556,
+            "p99_client_latency_s": 11.413638941120588,
+            "p50_client_ttft_s": 0.07502746902173385,
+            "p95_client_ttft_s": 0.3292887221265117,
+            "p99_client_ttft_s": 0.975635812896071,
+            "error_rate": 0.0,
+            "rejection_rate": 0.0,
+            "p95_dispatch_lag_s": 0.0004250290978234261
+          },
+          "64": {
+            "successful_requests_per_s": 11.722537552065019,
+            "completed_output_tokens_per_s": 1006.4111089449207,
+            "p50_client_latency_s": 3.901130913523957,
+            "p95_client_latency_s": 11.234476171637652,
+            "p99_client_latency_s": 15.186264174943789,
+            "p50_client_ttft_s": 1.4303362560458481,
+            "p95_client_ttft_s": 1.9141124281217343,
+            "p99_client_ttft_s": 2.2770263021055133,
+            "error_rate": 0.0,
+            "rejection_rate": 0.0,
+            "p95_dispatch_lag_s": 0.0009348185965791338
+          },
+          "128": {
+            "successful_requests_per_s": 11.712150246884505,
+            "completed_output_tokens_per_s": 1005.5193310956931,
+            "p50_client_latency_s": 9.27931187901413,
+            "p95_client_latency_s": 16.634596162912203,
+            "p99_client_latency_s": 20.388843577475054,
+            "p50_client_ttft_s": 6.747532074979972,
+            "p95_client_ttft_s": 7.7401577514887325,
+            "p99_client_ttft_s": 8.002365749116288,
+            "error_rate": 0.0,
+            "rejection_rate": 0.0,
+            "p95_dispatch_lag_s": 0.007799152954248707
+          },
+          "256": {
+            "successful_requests_per_s": 11.796730048789247,
+            "completed_output_tokens_per_s": 1012.4248646122151,
+            "p50_client_latency_s": 19.91823835147079,
+            "p95_client_latency_s": 27.270903004001593,
+            "p99_client_latency_s": 31.228345055410173,
+            "p50_client_ttft_s": 17.272261611069553,
+            "p95_client_ttft_s": 19.041068834101317,
+            "p99_client_ttft_s": 19.27724283264484,
+            "error_rate": 0.0,
+            "rejection_rate": 0.0,
+            "p95_dispatch_lag_s": 0.01585771422833204
+          },
+          "512": {
+            "successful_requests_per_s": 11.81097884139871,
+            "completed_output_tokens_per_s": 1013.6477316159408,
+            "p50_client_latency_s": 40.359334202483296,
+            "p95_client_latency_s": 47.895290336484315,
+            "p99_client_latency_s": 51.588745948199644,
+            "p50_client_ttft_s": 37.80014754051808,
+            "p95_client_ttft_s": 40.29635194474249,
+            "p99_client_ttft_s": 40.853180246443955,
+            "error_rate": 0.0,
+            "rejection_rate": 0.0,
+            "p95_dispatch_lag_s": 0.04064759817556478
+          },
+          "1024": {
+            "successful_requests_per_s": 11.771085449153492,
+            "completed_output_tokens_per_s": 1010.2239809599756,
+            "p50_client_latency_s": 80.5036541504669,
+            "p95_client_latency_s": 89.30883011954138,
+            "p99_client_latency_s": 93.30999046700774,
+            "p50_client_ttft_s": 78.49214377248427,
+            "p95_client_ttft_s": 82.71526618730859,
+            "p99_client_ttft_s": 83.0282795603224,
+            "error_rate": 0.0,
+            "rejection_rate": 0.0,
+            "p95_dispatch_lag_s": 0.1103032257524319
+          }
+        }
+      }
+    },
+    {
+      "id": "2.concurrency-levels-14b",
+      "criterion": 2,
+      "title": "Throughput and latency reported at every concurrency level (14b)",
+      "category": "completeness",
+      "status": "INCONCLUSIVE",
+      "detail": "stage 14b-nf4-prod was not found in the evidence",
+      "measured": {}
+    },
+    {
+      "id": "2.request-volume",
+      "criterion": 2,
+      "title": "At least 10,000 requests executed overall",
+      "category": "completeness",
+      "status": "PASS",
+      "detail": "20568 requests executed across all stages (need 10000; the 100000-request stretch target is not met)",
+      "measured": {
+        "total_requests": 20568,
+        "stretch_met": false
+      }
+    },
+    {
+      "id": "2.saturation-found-7b",
+      "criterion": 2,
+      "title": "Maximum sustainable arrival rate found by driving to saturation (7b)",
+      "category": "completeness",
+      "status": "PASS",
+      "detail": "12 req/s is the highest rate that, with every lower rate, met the objective; a higher rate did not",
+      "measured": {
+        "max_sustainable_rate": 12,
+        "ladder": [
+          {
+            "rate": 1,
+            "completed": 240,
+            "small": false,
+            "tok_s": 83.68869349455092,
+            "ttft_p95": 0.18105223322054367,
+            "e2e_p95": 4.877879876864603,
+            "error_rate": 0.0,
+            "attainment": 1.0,
+            "goodput": 0.9543517266317695
+          },
+          {
+            "rate": 2,
+            "completed": 240,
+            "small": false,
+            "tok_s": 163.4674270113464,
+            "ttft_p95": 0.18564624682767314,
+            "e2e_p95": 5.0842441853601406,
+            "error_rate": 0.0,
+            "attainment": 1.0,
+            "goodput": 1.8641158644266431
+          },
+          {
+            "rate": 3,
+            "completed": 240,
+            "small": false,
+            "tok_s": 238.95402312704493,
+            "ttft_p95": 0.19163840874680318,
+            "e2e_p95": 5.7441453409788625,
+            "error_rate": 0.0,
+            "attainment": 1.0,
+            "goodput": 2.7249342179269593
+          },
+          {
+            "rate": 4,
+            "completed": 240,
+            "small": false,
+            "tok_s": 310.58438244754336,
+            "ttft_p95": 0.19747441326617263,
+            "e2e_p95": 5.934904597053535,
+            "error_rate": 0.0,
+            "attainment": 1.0,
+            "goodput": 3.541777619852248
+          },
+          {
+            "rate": 6,
+            "completed": 240,
+            "small": false,
+            "tok_s": 443.9395667080649,
+            "ttft_p95": 0.2228238099662119,
+            "e2e_p95": 6.085318468807963,
+            "error_rate": 0.0,
+            "attainment": 1.0,
+            "goodput": 5.062505749783122
+          },
+          {
+            "rate": 8,
+            "completed": 240,
+            "small": false,
+            "tok_s": 562.851391240767,
+            "ttft_p95": 0.2841134001675527,
+            "e2e_p95": 6.656330410233931,
+            "error_rate": 0.0,
+            "attainment": 1.0,
+            "goodput": 6.418527696369101
+          },
+          {
+            "rate": 12,
+            "completed": 240,
+            "small": false,
+            "tok_s": 765.9453051893996,
+            "ttft_p95": 0.4283230885223018,
+            "e2e_p95": 8.08743955940008,
+            "error_rate": 0.0,
+            "attainment": 1.0,
+            "goodput": 8.734527855433617
+          },
+          {
+            "rate": 16,
+            "completed": 240,
+            "small": false,
+            "tok_s": 851.7601051173538,
+            "ttft_p95": 2.411065218475414,
+            "e2e_p95": 9.646613123052521,
+            "error_rate": 0.0,
+            "attainment": 0.8125,
+            "goodput": 7.891913926536349
+          },
+          {
+            "rate": 24,
+            "completed": 240,
+            "small": false,
+            "tok_s": 857.5916789112564,
+            "ttft_p95": 7.124196330300765,
+            "e2e_p95": 13.586908810498425,
+            "error_rate": 0.0,
+            "attainment": 0.39166666666666666,
+            "goodput": 3.8303534076621735
+          },
+          {
+            "rate": 32,
+            "completed": 240,
+            "small": false,
+            "tok_s": 856.335534536785,
+            "ttft_p95": 9.601273161126299,
+            "e2e_p95": 15.436472939950178,
+            "error_rate": 0.0,
+            "attainment": 0.3125,
+            "goodput": 3.051656613620587
+          }
+        ]
+      }
+    },
+    {
+      "id": "2.saturation-found-14b",
+      "criterion": 2,
+      "title": "Maximum sustainable arrival rate found by driving to saturation (14b)",
+      "category": "completeness",
+      "status": "INCONCLUSIVE",
+      "detail": "14b-nf4-prod ladder-poisson was not found in the evidence",
+      "measured": {}
+    },
+    {
+      "id": "2.speedup-over-serial",
+      "criterion": 2,
+      "title": "Continuous batching is at least 1.5x the serial baseline on comparable workloads",
+      "category": "performance",
+      "status": "PASS",
+      "detail": "cmp-c8: 5.98x, cmp-c32: 15.50x (need 1.5x; median of repeats, wall-clock tokens/s)",
+      "measured": {
+        "ratios": {
+          "cmp-c8": 5.9790499388646,
+          "cmp-c32": 15.50114639352129
+        }
+      }
+    },
+    {
+      "id": "3.sustained-success",
+      "criterion": 3,
+      "title": "At sustainable load at least 99.9% of requests succeed",
+      "category": "reliability",
+      "status": "PASS",
+      "detail": "3000 of 3000 succeeded (1.00000, need 0.999); intentionally cancelled requests and documented overload rejections are excluded, timeouts and failures are not",
+      "measured": {
+        "success_rate": 1.0,
+        "requests": 3000
+      }
+    },
+    {
+      "id": "3.zero-cuda-oom",
+      "criterion": 3,
+      "title": "Zero CUDA out-of-memory events",
+      "category": "reliability",
+      "status": "PASS",
+      "detail": "3095 telemetry samples: max cuda_oom_events 0; OOM text in engine logs: none",
+      "measured": {
+        "max_oom_events": 0,
+        "logs_with_oom": []
+      }
+    },
+    {
+      "id": "3.overload",
+      "criterion": 3,
+      "title": "At overload the queue stays bounded, rejections are controlled and nothing leaks",
+      "category": "reliability",
+      "status": "FAIL",
+      "detail": "nothing was rejected: the overload never exceeded the queue, so the bound was not exercised; uncontrolled failures: {'incomplete_stream': 318}",
+      "measured": {
+        "max_queue_depth": 976,
+        "queue_capacity": 1100,
+        "rejected": 0
+      }
+    },
+    {
+      "id": "3.crash-recovery",
+      "criterion": 3,
+      "title": "A worker crash recovers within 60 seconds with request accounting intact",
+      "category": "reliability",
+      "status": "PASS",
+      "detail": "recovered in 16.3 s (limit 60 s); failed accounting checks: none",
+      "measured": {
+        "recovery_s": 16.29153333697468,
+        "failed_checks": []
+      }
+    },
+    {
+      "id": "4.slo-declared-before-execution",
+      "criterion": 4,
+      "title": "Workload-specific SLOs were declared before execution and used unchanged",
+      "category": "reproducibility",
+      "status": "PASS",
+      "detail": "42 runs carry exactly the SLO committed in criteria.json",
+      "measured": {
+        "checked": 42
+      }
+    },
+    {
+      "id": "4.latency-at-operating-point-7b",
+      "criterion": 4,
+      "title": "P95 TTFT <= 2 s and P95 inter-token <= 150 ms at the accepted-load operating point (7b)",
+      "category": "performance",
+      "status": "PASS",
+      "detail": "at 12 req/s: P95 TTFT 0.428 s (max 2.0), P95 inter-token 58.7 ms (max 150); P50/P95/P99 e2e 2.304627623001579/8.08743955940008/11.006301456529158 s",
+      "measured": {
+        "operating_rate": 12,
+        "p95_ttft_s": 0.4283230885223018,
+        "p95_itl_s": 0.058686267235316336
+      }
+    },
+    {
+      "id": "4.latency-at-operating-point-14b",
+      "criterion": 4,
+      "title": "P95 TTFT <= 2 s and P95 inter-token <= 150 ms at the accepted-load operating point (14b)",
+      "category": "performance",
+      "status": "INCONCLUSIVE",
+      "detail": "14b-nf4-prod ladder-poisson was not found in the evidence",
+      "measured": {}
+    },
+    {
+      "id": "4.failures-not-hidden",
+      "criterion": 4,
+      "title": "Timeouts, rejections and failures are counted in every rate and SLO attainment",
+      "category": "reproducibility",
+      "status": "PASS",
+      "detail": "46 runs checked",
+      "measured": {
+        "checked": 46
+      }
+    },
+    {
+      "id": "5.same-hardware-7b",
+      "criterion": 5,
+      "title": "vLLM and TensorPilot ran on the same physical GPU, model revision and precision",
+      "category": "completeness",
+      "status": "INCONCLUSIVE",
+      "detail": "vllm-7b-bf16-prod has no benchmark manifest (it produced no measurements), so nothing was compared",
+      "measured": {}
+    },
+    {
+      "id": "5.repeats-and-workloads-7b",
+      "criterion": 5,
+      "title": "Three measured repetitions per key configuration, on identical workloads",
+      "category": "completeness",
+      "status": "INCONCLUSIVE",
+      "detail": "cmp-c8: 3 TensorPilot / 0 vLLM repeats; cmp-c32: 3 TensorPilot / 0 vLLM repeats; cmp-c128: 3 TensorPilot / 0 vLLM repeats",
+      "measured": {
+        "throughput": {}
+      }
+    },
+    {
+      "id": "5.metrics-reported-7b",
+      "criterion": 5,
+      "title": "Throughput, goodput, latency, VRAM and error rates are reported for both engines",
+      "category": "completeness",
+      "status": "PASS",
+      "detail": "throughput, goodput, latency percentiles, VRAM and error rates are present for both",
+      "measured": {}
+    },
+    {
+      "id": "5.gaps-explained",
+      "criterion": 5,
+      "title": "Performance gaps to vLLM are explained with evidence",
+      "category": "completeness",
+      "status": "INCONCLUSIVE",
+      "detail": "no written report was supplied (--report)",
+      "measured": {}
+    },
+    {
+      "id": "6.gpu-telemetry",
+      "criterion": 6,
+      "title": "Continuous GPU telemetry covers every measured experiment",
+      "category": "reproducibility",
+      "status": "PASS",
+      "detail": "22 experiments have continuous samples",
+      "measured": {
+        "checked": 22
+      }
+    },
+    {
+      "id": "6.pinned-and-reproducible",
+      "criterion": 6,
+      "title": "Configurations, model revisions and the image are pinned and reproducible",
+      "category": "reproducibility",
+      "status": "PASS",
+      "detail": "2 stages ran the committed config, a pinned revision and a declared image",
+      "measured": {}
+    },
+    {
+      "id": "6.archives",
+      "criterion": 6,
+      "title": "Evidence archives are SHA-256 verified and secret-free",
+      "category": "reproducibility",
+      "status": "INCONCLUSIVE",
+      "detail": "no .tar.gz archives were supplied (--archives)",
+      "measured": {}
+    },
+    {
+      "id": "7.stage-caps-respected",
+      "criterion": 7,
+      "title": "Every stage stopped within its hard cap",
+      "category": "budget",
+      "status": "INCONCLUSIVE",
+      "detail": "no ledger was supplied (--ledger)",
+      "measured": {}
+    },
+    {
+      "id": "7.within-budget",
+      "criterion": 7,
+      "title": "Total spend stayed within the approved budget",
+      "category": "budget",
+      "status": "INCONCLUSIVE",
+      "detail": "pass --spent-usd from the Runpod billing page. The ledger shows 0 stage minutes, but boot, downloads, loads and idle time are not in it",
+      "measured": {
+        "stage_minutes": 0
+      }
+    }
+  ]
+}

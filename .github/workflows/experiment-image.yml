@@ -59,7 +59,8 @@ jobs:
                 tests/test_baseline.py tests/test_load_scale.py tests/test_load_openai.py \
                 tests/test_memory_gate.py tests/test_quick_compare.py tests/test_acceptance.py \
                 tests/test_production_suite.py tests/test_divergence_probe.py tests/test_stage_info.py \
-                tests/test_baseline_quick.py tests/test_server_cli.py tests/test_journal.py tests/test_packing_gate.py'
+                tests/test_baseline_quick.py tests/test_server_cli.py tests/test_journal.py tests/test_packing_gate.py \
+                tests/test_vllm_toolchain.py tests/test_run_vllm_rerun.py'
       - name: Verify SSH hardening, permissions, evidence path and shutdown (no GPU)
         run: deploy/runpod/test-pod-image.sh tensorpilot-exp:ci --slow
 

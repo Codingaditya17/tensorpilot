@@ -197,6 +197,20 @@ STAGES = {
                           "dtype": "bfloat16", "max_prompt_tokens": 1024, "batch_size": 48, "queue_size": PROD_QUEUE},
     "vllm-14b-nf4-prod": {"model": "14b", "engine": "vllm", "execution": "batch", "quantization": "nf4",
                           "dtype": "bfloat16", "max_prompt_tokens": 1024, "batch_size": 28, "queue_size": PROD_QUEUE},
+    # The lean vLLM comparison, for re-running only what a failed vLLM stage lost (docs/v10-7b-results.md). Same model, settings and
+    # experiment definitions as the -prod stages, restricted to the comparison points and the saturation plateau.
+    "7b-bf16-cmp": {"model": "7b", "engine": "tensorpilot", "execution": "batch", "quantization": "none",
+                    "dtype": "bfloat16", "max_prompt_tokens": 1024, "batch_size": 48, "queue_size": PROD_QUEUE,
+                    "prefill_pack": PREFILL_PACK_TOKENS, "backlog": 2048},
+    "vllm-7b-bf16-cmp": {"model": "7b", "engine": "vllm", "execution": "batch", "quantization": "none",
+                         "dtype": "bfloat16", "max_prompt_tokens": 1024, "batch_size": 48, "queue_size": PROD_QUEUE},
+}
+# Lean stages: the -prod stage they are cut from, and the experiment ids they keep (definitions are copied unchanged, so the
+# workload hashes match the archived -prod runs). TensorPilot's control repeats only the comparison points, on the vLLM Pod's card.
+LEAN_STAGES = {
+    "7b-bf16-cmp": ("7b-bf16-prod", ("cold-start", "cmp-c1", "cmp-c8", "cmp-c32", "cmp-c128")),
+    "vllm-7b-bf16-cmp": ("vllm-7b-bf16-prod", ("cold-start", "cmp-c1", "cmp-c8", "cmp-c32", "cmp-c128",
+                                               "scale-c64", "scale-c256", "scale-c1024")),
 }
 
 
@@ -251,6 +265,12 @@ SESSIONS = {
            "overhead_minutes": 40, "purpose": "7B bf16: serial baseline, scale sweep, reliability, crash recovery, vLLM"},
     "14b": {"stages": ["14b-nf4-prod", "quality-14b"], "overhead_minutes": 25,
             "purpose": "14B NF4: load, generate, scale sweep, fidelity"},
+}
+# Re-running only what the 7B session lost: the vLLM comparison (its stage failed to start) and the NF4 quality evaluation (skipped).
+# The TensorPilot control repeats the comparison points on the same card as vLLM, so the two engines share a physical GPU and a Pod.
+RERUN_SESSIONS = {
+    "7b-vllm-rerun": {"stages": ["vllm-7b-bf16-cmp", "7b-bf16-cmp", "quality-7b"], "overhead_minutes": 35,
+                      "purpose": "vLLM against TensorPilot on one card at the comparison points, and the 7B NF4 quality evaluation"},
 }
 # Not counted against the $9: only if credits remain after the core sessions. A fresh Pod re-downloads 28 GB and reinstalls vLLM.
 OPTIONAL_SESSIONS = {
@@ -445,6 +465,9 @@ def experiments_for(stage):
         return quick_experiments("0.5b-quick-batch", cold)
     if stage.endswith("-prod") or stage.endswith("-prod-serial"):
         return prod_experiments(stage, cold)
+    if stage in LEAN_STAGES:
+        parent, keep = LEAN_STAGES[stage]
+        return [e for e in prod_experiments(parent, cold) if e["id"] in keep]
     if stage == "0.5b-serial":
         legacy = {"prompt_tokens": 17, "output_tokens": 32}
         regression = spec(10, [{"name": "regression", "prompt_tokens": legacy["prompt_tokens"],
@@ -541,6 +564,7 @@ def main():
     parser.add_argument("--write", metavar="DIR", help="write benchmarks/gpu/v10-<stage>.json for every stage")
     parser.add_argument("--plan", action="store_true", help="print expected and capped experiment minutes")
     parser.add_argument("--budget", action="store_true", help="print the session budgets and costs (JSON)")
+    parser.add_argument("--rerun-budget", action="store_true", help="print the budget of the vLLM/quality re-run session (JSON)")
     parser.add_argument("--price-per-hour", type=float, default=ASSUMED_PRICE_PER_HOUR, help="your Pod's real hourly price")
     parser.add_argument("--budget-usd", type=float, default=BUDGET_USD)
     parser.add_argument("--list-stages", action="store_true", help="print stage names, one per line")
@@ -549,6 +573,9 @@ def main():
     args = parser.parse_args()
     if args.budget:
         print(json.dumps(budget_plan(args.price_per_hour, args.budget_usd), indent=2))
+        return 0
+    if args.rerun_budget:
+        print(json.dumps(budget_plan(args.price_per_hour, args.budget_usd, RERUN_SESSIONS), indent=2))
         return 0
     if args.list_stages:
         print("\n".join(all_stage_names()))

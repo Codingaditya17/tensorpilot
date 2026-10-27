@@ -378,6 +378,42 @@ def test_a_vllm_run_on_a_different_gpu_or_pod_fails_the_same_hardware_item(good,
     assert status(run(good, tmp_path), "5.same-hardware-7b") == PASS
 
 
+def rerun_session(good, *, with_control):
+    """The vLLM stage failed in the main session: replace it by the lean re-run, on a second Pod, with or without a TensorPilot control."""
+    import shutil
+    shutil.rmtree(good.stage_dir("vllm-7b-bf16-prod"))
+    for stage in ("vllm-7b-bf16-cmp",) + (("7b-bf16-cmp",) if with_control else ()):
+        good.experiment(stage, "cold-start", good_records(4), slo=False)
+        for point in ("cmp-c1", "cmp-c8", "cmp-c32", "cmp-c128"):
+            for repeat in (1, 2, 3):
+                good.experiment(stage, point, good_records(12), repeat=repeat)
+        good.finish_stage(stage, pod="pod-rerun", uuid="GPU-rerun")
+    return good
+
+
+def test_a_lean_vllm_rerun_is_compared_with_the_tensorpilot_control_from_the_same_pod(good, tmp_path):
+    from tensorpilot.acceptance import vllm_pair_7b
+    rerun_session(good, with_control=True)
+    verdict = run(good, tmp_path)
+    assert status(verdict, "5.same-hardware-7b") == PASS, "the control and vLLM share a Pod and a card"
+    assert status(verdict, "5.repeats-and-workloads-7b") == PASS and status(verdict, "5.metrics-reported-7b") == PASS
+    assert vllm_pair_7b({"vllm-7b-bf16-cmp": 1, "7b-bf16-cmp": 1, "7b-bf16-prod": 1}) == ("7b-bf16-cmp", "vllm-7b-bf16-cmp", "7b")
+
+
+def test_a_lean_vllm_rerun_without_the_control_is_honest_that_the_cards_differ(good, tmp_path):
+    """Pairing vLLM with the archived run from another Pod is allowed, but the same-hardware item must say it is not the same card."""
+    rerun_session(good, with_control=False)
+    row = next(r for r in run(good, tmp_path)["items"] if r["id"] == "5.same-hardware-7b")
+    assert row["status"] == FAIL and "GPU-rerun" in row["detail"]
+
+
+def test_a_vllm_stage_that_never_started_is_inconclusive_not_a_hardware_mismatch(good, tmp_path):
+    """The 7B session's vLLM engine died during start-up: the stage has a stage-info.json (same card, same Pod) and no manifest."""
+    (good.stage_dir("vllm-7b-bf16-prod") / "bench" / "manifest.json").unlink()
+    row = next(r for r in run(good, tmp_path)["items"] if r["id"] == "5.same-hardware-7b")
+    assert row["status"] == INCONCLUSIVE and "no benchmark manifest" in row["detail"]
+
+
 def test_unproven_hardware_identity_is_inconclusive(good, tmp_path):
     (good.stage_dir("vllm-7b-bf16-prod") / "stage-info.json").unlink()
     assert status(run(good, tmp_path), "5.same-hardware-7b") == INCONCLUSIVE

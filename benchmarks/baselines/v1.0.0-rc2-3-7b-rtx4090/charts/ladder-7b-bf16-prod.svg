@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 420" width="760" height="420" role="img" aria-labelledby="t d"><style>:root{--surface:#fcfcfb;--text:#0b0b0b;--muted:#52514e;--grid:#e3e2de;--s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a}@media (prefers-color-scheme: dark){:root{--surface:#1a1a19;--text:#f0efec;--muted:#c3c2b7;--grid:#34332f;--s1:#3987e5;--s2:#d95926;--s3:#199e70}}text{font:12px system-ui,sans-serif;fill:var(--text)}.m{fill:var(--muted)}.t{font-size:14px;font-weight:600}</style><title id="t">Goodput against offered rate: 7b-bf16-prod</title>
+<desc id="d">goodput (requests/s) against offered requests/s for goodput, ideal: every offered request meets the SLO. The same numbers are in the table below the chart.</desc>
+<rect width="760" height="420" fill="var(--surface)"/>
+<text class="t" x="76" y="24">Goodput against offered rate: 7b-bf16-prod</text>
+<text class="m" x="76" y="42">the dashed line is the ideal; goodput falls below it as the SLO is missed or requests fail</text>
+<line x1="76" x2="590" y1="358.0" y2="358.0" stroke="var(--grid)" stroke-width="1"/><text class="m" x="68" y="362.0" text-anchor="end">0</text>
+<line x1="76" x2="590" y1="297.6" y2="297.6" stroke="var(--grid)" stroke-width="1"/><text class="m" x="68" y="301.6" text-anchor="end">2</text>
+<line x1="76" x2="590" y1="237.2" y2="237.2" stroke="var(--grid)" stroke-width="1"/><text class="m" x="68" y="241.2" text-anchor="end">4</text>
+<line x1="76" x2="590" y1="176.8" y2="176.8" stroke="var(--grid)" stroke-width="1"/><text class="m" x="68" y="180.8" text-anchor="end">6</text>
+<line x1="76" x2="590" y1="116.4" y2="116.4" stroke="var(--grid)" stroke-width="1"/><text class="m" x="68" y="120.4" text-anchor="end">8</text>
+<line x1="76" x2="590" y1="56.0" y2="56.0" stroke="var(--grid)" stroke-width="1"/><text class="m" x="68" y="60.0" text-anchor="end">10</text>
+<text class="m" x="76.0" y="376" text-anchor="middle">1</text>
+<text class="m" x="178.8" y="376" text-anchor="middle">2</text>
+<text class="m" x="238.9" y="376" text-anchor="middle">3</text>
+<text class="m" x="281.6" y="376" text-anchor="middle">4</text>
+<text class="m" x="341.7" y="376" text-anchor="middle">6</text>
+<text class="m" x="384.4" y="376" text-anchor="middle">8</text>
+<text class="m" x="444.5" y="376" text-anchor="middle">12</text>
+<text class="m" x="487.2" y="376" text-anchor="middle">16</text>
+<text class="m" x="547.3" y="376" text-anchor="middle">24</text>
+<text class="m" x="590.0" y="376" text-anchor="middle">32</text>
+<text class="m" x="333" y="406" text-anchor="middle">offered requests/s</text><text class="m" x="14" y="207" transform="rotate(-90 14 207)" text-anchor="middle">goodput (requests/s)</text>
+<polyline fill="none" stroke="var(--s1)" stroke-width="2" points="76.0,329.2 178.8,301.7 238.9,275.7 281.6,251.0 341.7,205.1 384.4,164.2 444.5,94.2 487.2,119.7 547.3,242.3 590.0,265.8"/>
+<circle cx="76.0" cy="329.2" r="4.5" fill="var(--s1)" stroke="var(--s1)" stroke-width="2"/>
+<circle cx="178.8" cy="301.7" r="4.5" fill="var(--s1)" stroke="var(--s1)" stroke-width="2"/>
+<circle cx="238.9" cy="275.7" r="4.5" fill="var(--s1)" stroke="var(--s1)" stroke-width="2"/>
+<circle cx="281.6" cy="251.0" r="4.5" fill="var(--s1)" stroke="var(--s1)" stroke-width="2"/>
+<circle cx="341.7" cy="205.1" r="4.5" fill="var(--s1)" stroke="var(--s1)" stroke-width="2"/>
+<circle cx="384.4" cy="164.2" r="4.5" fill="var(--s1)" stroke="var(--s1)" stroke-width="2"/>
+<circle cx="444.5" cy="94.2" r="4.5" fill="var(--s1)" stroke="var(--s1)" stroke-width="2"/>
+<circle cx="487.2" cy="119.7" r="4.5" fill="var(--s1)" stroke="var(--s1)" stroke-width="2"/>
+<circle cx="547.3" cy="242.3" r="4.5" fill="var(--s1)" stroke="var(--s1)" stroke-width="2"/>
+<circle cx="590.0" cy="265.8" r="4.5" fill="var(--s1)" stroke="var(--s1)" stroke-width="2"/>
+<text x="600.0" y="269.8">goodput</text>
+<line x1="604" x2="624" y1="64" y2="64" stroke="var(--s1)" stroke-width="2"/><text x="630" y="68">goodput</text>
+<polyline fill="none" stroke="var(--muted)" stroke-width="1.5" stroke-dasharray="6 4" points="76.0,327.8 178.8,297.6 238.9,267.4 281.6,237.2 341.7,176.8 384.4,116.4"/>
+<line x1="604" x2="624" y1="82" y2="82" stroke="var(--muted)" stroke-width="1.5" stroke-dasharray="6 4"/><text class="m" x="630" y="86">ideal: every offered request meets the SLO</text>
+</svg>
