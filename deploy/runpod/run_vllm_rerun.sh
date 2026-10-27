@@ -5,17 +5,18 @@
 #   set -o pipefail
 #   bash run_vllm_rerun.sh 2>&1 | tee ~/rerun.log ; echo "exit status: ${PIPESTATUS[0]}"
 #
-# Order: toolchain check -> vLLM install (plan, install, GPU kernel smoke) -> vllm-7b-bf16-cmp -> 7b-bf16-cmp -> quality-7b.
-# vLLM goes first because it is what failed; everything before it takes seconds or is the install itself. It stops at the first
+# Order: toolchain check -> vLLM install (plan, install, GPU smoke: Triton and FlashInfer kernels) -> vllm-startup-0.5b (the benchmark's
+# exact vLLM command on a small model, plus top-k/top-p sampling requests) -> vllm-7b-bf16-cmp -> 7b-bf16-cmp -> quality-7b.
+# vLLM goes first because it is what failed twice; the early startup stage means a third start-up failure costs minutes, not the 7B run. It stops at the first
 # failure of anything; every stage archives its evidence whether it passes or fails. THE POD KEEPS BILLING until you terminate it.
 #
-# Environment it needs. You export: TENSORPILOT_API_KEY, TENSORPILOT_IMAGE_REF, RUNPOD_POD_ID, SESSION_BUDGET_MINUTES (84 to 95),
+# Environment it needs. You export: TENSORPILOT_API_KEY, TENSORPILOT_IMAGE_REF, RUNPOD_POD_ID, SESSION_BUDGET_MINUTES (97 to 105),
 # PREFILL_PACK_TOKENS (512); PRICE_PER_HOUR_USD is optional. The login profile gives it: PATH (scale_session.sh, install_vllm.sh,
-# check_toolchain.sh), TENSORPILOT_POD_MAX_MINUTES (150 or more) and TENSORPILOT_RESULTS_ROOT. Nothing else is read.
+# check_toolchain.sh), TENSORPILOT_POD_MAX_MINUTES (165 or more) and TENSORPILOT_RESULTS_ROOT. Nothing else is read.
 set -Eeuo pipefail
 
-# The digest of the published image that carries gcc and libc6-dev (v1.0.0-rc2-4). The script refuses to run until it is pinned.
-EXPECTED_DIGEST="sha256:92721fab66c72deb382cf21248ca19cb43e18dc5147fc9a25deacaddf888612f"
+# The digest of the published image that carries gcc, libc6-dev and the CUDA_HOME assembly (v1.0.0-rc2-5). The script refuses to run until it is pinned.
+EXPECTED_DIGEST="sha256:UNSET-pin-the-published-rc2-5-digest-here"
 STAGE="startup"
 trap 'echo >&2; echo "*** STOPPED at: ${STAGE}. Evidence for every stage that ran, including this one, is archived under ${SESSION:-the session directory}." >&2; echo "*** THE POD IS STILL BILLING: copy the evidence, then TERMINATE the Pod." >&2' ERR
 
@@ -26,10 +27,10 @@ for name in TENSORPILOT_API_KEY RUNPOD_POD_ID; do [[ -n "${!name:-}" ]] || fail 
 [[ "${TENSORPILOT_IMAGE_REF:-}" == *"@${EXPECTED_DIGEST}" ]] || fail "TENSORPILOT_IMAGE_REF must end in @${EXPECTED_DIGEST}"
 [[ "${PREFILL_PACK_TOKENS:-}" == 512 ]] || fail "PREFILL_PACK_TOKENS must be 512: the control must run TensorPilot as the archived 7b-bf16-prod did"
 budget="${SESSION_BUDGET_MINUTES:-}"; pod_max="${TENSORPILOT_POD_MAX_MINUTES:-}"
-[[ "$budget" =~ ^[0-9]+$ ]] && (( budget >= 84 && budget <= 95 )) ||
-  fail "SESSION_BUDGET_MINUTES must be 84 to 95 (less and the ledger refuses a stage; more spends past the plan)"
-[[ "$pod_max" =~ ^[0-9]+$ ]] && (( pod_max >= 150 )) ||
-  fail "TENSORPILOT_POD_MAX_MINUTES must be at least 150 in the Pod's environment variables"
+[[ "$budget" =~ ^[0-9]+$ ]] && (( budget >= 97 && budget <= 105 )) ||
+  fail "SESSION_BUDGET_MINUTES must be 97 to 105 (less and the ledger refuses a stage; more spends past the plan)"
+[[ "$pod_max" =~ ^[0-9]+$ ]] && (( pod_max >= 165 )) ||
+  fail "TENSORPILOT_POD_MAX_MINUTES must be at least 165 in the Pod's environment variables"
 for tool in scale_session.sh install_vllm.sh check_toolchain.sh; do
   command -v "$tool" >/dev/null || fail "$tool is not on PATH (log in again so the profile is read)"
 done
@@ -48,13 +49,16 @@ run() { STAGE="$1"; echo; echo "=== $(date -u +%H:%M:%S) stage $1"; scale_sessio
 STAGE="toolchain check"
 check_toolchain.sh
 
-# ----- 2. vLLM: its own virtualenv; the installer repeats the toolchain check and launches a real Triton kernel on the GPU -----
+# ----- 2. vLLM: its own virtualenv; the installer repeats the toolchain check, assembles a CUDA_HOME from the venv's CUDA wheels, and runs a
+# -----    Triton kernel and FlashInfer's sampling kernel (nvcc-compiled) on the GPU -----
 STAGE="vLLM plan"
 install_vllm.sh --plan
 STAGE="vLLM installation"
 install_vllm.sh
 
-# ----- 3. the comparison: vLLM first, then TensorPilot on the same card, then the skipped quality evaluation -----
+# ----- 3. the early validation (a 0.5B download, minutes), then the comparison: vLLM first, then TensorPilot on the same card, then the
+# -----    skipped quality evaluation. A failure at any step stops the chain with that stage's evidence archived. -----
+run vllm-startup-0.5b
 run vllm-7b-bf16-cmp
 run 7b-bf16-cmp
 run quality-7b

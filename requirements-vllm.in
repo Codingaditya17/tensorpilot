@@ -5,3 +5,9 @@
 #   uv pip compile requirements-vllm.in --python-platform x86_64-unknown-linux-gnu --python-version 3.11 --generate-hashes -o requirements-vllm.txt
 vllm==0.31.0
 bitsandbytes==0.50.2
+# nvcc is pulled in unpinned by humming-kernels/tilelang, so the resolver took 13.4.92, while torch's own cuda-toolkit 13.0.3 pins the
+# 13.0.88 compiler set and the CUDA runtime headers are 13.0.96 (CUDART_VERSION 13000). FlashInfer's nvcc JIT build fails on that
+# mix with CCCL's "CUDA compiler and CUDA toolkit headers are incompatible". Pin the coherent 13.0 set.
+nvidia-cuda-nvcc==13.0.88
+nvidia-cuda-crt==13.0.88
+nvidia-nvvm==13.0.88

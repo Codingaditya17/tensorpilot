@@ -273,6 +273,12 @@ vllm_guards() {
   local -a toolchain=("$REPO_ROOT/deploy/runpod/check_toolchain.sh")
   skip_gpu || toolchain+=(--gpu)
   "${toolchain[@]}" "$python" >"$STAGE_DIR/toolchain.txt" 2>&1 || { cat "$STAGE_DIR/toolchain.txt" >&2; die "the vLLM toolchain check failed (see toolchain.txt)"; }
+  # The engine needs the same CUDA_HOME and PATH the check used: FlashInfer compiles its sampling kernel with nvcc and runs ninja by name.
+  VLLM_CUDA_HOME=""
+  if ! skip_gpu; then
+    VLLM_CUDA_HOME="$("$REPO_ROOT/deploy/runpod/cuda_home.sh" "$(dirname "$(dirname "$python")")")" ||
+      die "could not assemble a CUDA_HOME for FlashInfer's JIT build (see the message above)"
+  fi
   help="$("$python" -m vllm.entrypoints.openai.api_server --help=all 2>&1)" || die "vLLM could not print its help"
   echo "$help" >"$STAGE_DIR/vllm-help.txt"
   grep -q -- "--generation-config" <<<"$help" ||
@@ -340,7 +346,11 @@ start_engine() {  # engine
   local -a command
   mapfile -t command < <("engine_command_$1")
   # The key travels by environment only, so it never appears in `ps`. vLLM reads VLLM_API_KEY.
-  VLLM_API_KEY="$TENSORPILOT_API_KEY" "${command[@]}" >"$STAGE_DIR/engine.log" 2>&1 &
+  local -a runtime=()
+  if [[ "$1" == "vllm" && -n "${VLLM_CUDA_HOME:-}" ]]; then
+    runtime=(CUDA_HOME="$VLLM_CUDA_HOME" PATH="$(dirname "$(vllm_python)"):$VLLM_CUDA_HOME/bin:$PATH")
+  fi
+  env "${runtime[@]}" VLLM_API_KEY="$TENSORPILOT_API_KEY" "${command[@]}" >"$STAGE_DIR/engine.log" 2>&1 &
   ENGINE_PID=$!
 }
 
@@ -379,6 +389,14 @@ stage_benchmark() {  # engine
   if [[ "$engine" == "vllm" ]]; then probe="$url/v1/models"; key="$TENSORPILOT_API_KEY"; fi
   wait_ready "$probe" "$ENGINE_PID" "$V10_READY_TIMEOUT_S" "$key" || { tail -20 "$STAGE_DIR/engine.log" >&2; return 1; }
   run_smoke "$engine" "$url" || return 1
+  if [[ "${V10_CHECK_ONLY:-0}" == "1" ]]; then
+    # The early startup validation: the engine came up with the benchmark's exact command, now exercise the sampler kernels that the
+    # greedy benchmark does not (FlashInfer's top-k/top-p path compiles with nvcc on first use) and stop. No benchmark runs.
+    log "startup check: sampling requests that take the top-k/top-p path"
+    run_guarded python3 -m tensorpilot.vllm_startup_check --url "$url" --model "$V10_MODEL_REPO" \
+      --output "$STAGE_DIR/startup-check.json" || return 1
+    return 0
+  fi
   if [[ "$engine" == "tensorpilot" && "$V10_EXECUTION" == "batch" ]] && memory_gate_applies; then
     # Measured, not planned: the real free memory inside the allocator cap and the slots actually granted.
     log "memory gate: measured margin and granted slots"

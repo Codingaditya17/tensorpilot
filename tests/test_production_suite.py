@@ -147,10 +147,26 @@ def test_the_lean_vllm_stage_adds_the_plateau_points_and_nothing_tensorpilot_onl
 def test_the_rerun_session_is_cheap_enough_to_fit_a_three_dollar_balance_at_the_measured_price():
     plan = suite.budget_plan(0.91, 3.0, suite.RERUN_SESSIONS)
     row = plan["sessions"]["7b-vllm-rerun"]
-    assert row["stages"] == ["vllm-7b-bf16-cmp", "7b-bf16-cmp", "quality-7b"], "vLLM first: it is the one that failed"
+    assert row["stages"] == ["vllm-startup-0.5b", "vllm-7b-bf16-cmp", "7b-bf16-cmp", "quality-7b"], "vLLM first: it failed twice"
     assert plan["fits_budget_worst_case"] and plan["every_expected_stage_can_start"]
-    assert row["worst_cost_usd"] < 2.2 and row["expected_cost_usd"] < 1.6
+    assert row["worst_cost_usd"] < 2.4 and row["expected_cost_usd"] < 1.8
 
 
 def test_the_core_sessions_are_unchanged_by_the_rerun_definitions():
     assert set(suite.SESSIONS) == {"gate", "7b", "14b"}
+
+
+def test_the_early_vllm_startup_stage_uses_the_benchmarks_vllm_command_on_a_small_model_and_runs_no_benchmark():
+    early, bench = suite.stage_env("vllm-startup-0.5b"), suite.stage_env("vllm-7b-bf16-cmp")
+    assert early["V10_ENGINE"] == "vllm" and early["V10_CHECK_ONLY"] == 1 and bench.get("V10_CHECK_ONLY", 0) in (0, "0")
+    for key in ("V10_DTYPE", "V10_BATCH_SIZE", "V10_MAX_PROMPT_TOKENS", "V10_QUANT"):
+        assert early[key] == bench[key], f"{key}: the early stage must start vLLM the way the benchmark does"
+    assert early["V10_MODEL_KEY"] == "0.5b" and early["V10_DOWNLOAD_GIB"] < 2
+    assert early["V10_CAP_MINUTES"] <= 12 and early["V10_CONFIG"] == ""
+
+
+def test_a_model_is_charged_its_download_by_the_first_stage_that_uses_it():
+    plan = suite.budget_plan(0.91, 3.0, suite.RERUN_SESSIONS)["sessions"]["7b-vllm-rerun"]
+    flags = suite._new_model_flags(plan["stages"])
+    assert flags == [True, True, False, False], "0.5B pays for itself, 7B pays at the vLLM stage, not at the first stage"
+    assert suite._new_model_flags(suite.SESSIONS["7b"]["stages"])[0] is True

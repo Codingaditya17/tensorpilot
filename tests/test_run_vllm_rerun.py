@@ -11,7 +11,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "deploy" / "runpod" / "run_vllm_rerun.sh"
 DIGEST = "sha256:" + "c" * 64
-CALLS_ORDER = ["check_toolchain", "install --plan", "install run", "scale vllm-7b-bf16-cmp", "scale 7b-bf16-cmp", "scale quality-7b"]
+CALLS_ORDER = ["check_toolchain", "install --plan", "install run", "scale vllm-startup-0.5b", "scale vllm-7b-bf16-cmp", "scale 7b-bf16-cmp",
+               "scale quality-7b"]
 
 FAKE_SCALE = r'''#!/usr/bin/env bash
 set -eu
@@ -49,7 +50,7 @@ def pod(tmp_path):
     env = {"PATH": f"{binary}:/usr/bin:/bin:/usr/local/bin", "HOME": str(tmp_path), "CALLS": str(tmp_path / "calls.txt"),
            "TENSORPILOT_V10_SESSION": str(tmp_path / "session"), "TENSORPILOT_API_KEY": "k" * 32,
            "TENSORPILOT_IMAGE_REF": f"ghcr.io/x/cuda-experiment@{DIGEST}", "RUNPOD_POD_ID": "pod-1",
-           "SESSION_BUDGET_MINUTES": "84", "PREFILL_PACK_TOKENS": "512", "TENSORPILOT_POD_MAX_MINUTES": "150"}
+           "SESSION_BUDGET_MINUTES": "97", "PREFILL_PACK_TOKENS": "512", "TENSORPILOT_POD_MAX_MINUTES": "165"}
     return tmp_path, env, pinned
 
 
@@ -88,25 +89,30 @@ def test_nothing_runs_after_any_failure(pod, failing):
     assert "STOPPED at:" in done.stderr and "STILL BILLING" in done.stderr
 
 
+def test_a_failed_early_startup_stage_stops_the_session_before_any_7b_stage(pod):
+    """The point of the 0.5B stage: a third start-up failure must cost minutes, not the 7B download and benchmark."""
+    done = run(pod, FAIL_AT="scale vllm-startup-0.5b")
+    assert calls(pod)[-1] == "scale vllm-startup-0.5b" and "vllm-7b-bf16-cmp" not in " ".join(calls(pod))
+    assert "STOPPED at: vllm-startup-0.5b" in done.stderr
+
+
 def test_a_missing_compiler_stops_the_session_before_the_install_or_any_download(pod):
     """The failure this script exists for: it must show in the first seconds, with nothing billed beyond boot."""
     done = run(pod, FAIL_AT="check_toolchain")
     assert calls(pod) == ["check_toolchain"] and "STOPPED at: toolchain check" in done.stderr
 
 
-def test_the_committed_script_is_pinned_to_the_published_rc2_4_digest_and_refuses_any_other(pod):
-    assert "sha256:92721fab66c72deb382cf21248ca19cb43e18dc5147fc9a25deacaddf888612f" in SCRIPT.read_text()
-    done = run(pod, script=SCRIPT)           # the fixture's image reference ends in a different digest
-    assert done.returncode == 2 and "TENSORPILOT_IMAGE_REF must end in @sha256:92721fab66c72deb382cf21248ca19cb43e18dc5147fc9a25deacaddf888612f" in done.stderr and calls(pod) == []
-    assert re.search(r'EXPECTED_DIGEST="sha256:[0-9a-f]{64}"', SCRIPT.read_text())
+def test_the_committed_script_refuses_until_an_image_digest_is_pinned(pod):
+    done = run(pod, script=SCRIPT)
+    assert done.returncode == 2 and "no image digest pinned" in done.stderr and calls(pod) == []
 
 
 @pytest.mark.parametrize("change", [{"TENSORPILOT_IMAGE_REF": "ghcr.io/x/cuda-experiment:v1.0.0-rc2-3"},
                                     {"TENSORPILOT_IMAGE_REF": "ghcr.io/x/c@sha256:" + "0" * 64},
                                     {"RUNPOD_POD_ID": None}, {"TENSORPILOT_API_KEY": None}, {"PREFILL_PACK_TOKENS": "0"},
-                                    {"PREFILL_PACK_TOKENS": None}, {"SESSION_BUDGET_MINUTES": "60"},
-                                    {"SESSION_BUDGET_MINUTES": "250"}, {"SESSION_BUDGET_MINUTES": None},
-                                    {"TENSORPILOT_POD_MAX_MINUTES": "120"}, {"TENSORPILOT_POD_MAX_MINUTES": None},
+                                    {"PREFILL_PACK_TOKENS": None}, {"SESSION_BUDGET_MINUTES": "84"},
+                                    {"SESSION_BUDGET_MINUTES": "250"}, {"SESSION_BUDGET_MINUTES": "106"}, {"SESSION_BUDGET_MINUTES": None},
+                                    {"TENSORPILOT_POD_MAX_MINUTES": "150"}, {"TENSORPILOT_POD_MAX_MINUTES": None},
                                     {"DRIVER": "570.1"}, {"V10_TEST_MODE": "1"}])
 def test_a_wrong_environment_is_refused_before_anything_runs(pod, change):
     done = run(pod, **change)
@@ -138,13 +144,13 @@ def test_the_script_documents_every_variable_it_reads():
 def test_the_stage_order_and_budget_match_the_plan():
     from tensorpilot import suite
     plan = suite.budget_plan(0.91, 3.0, suite.RERUN_SESSIONS)["sessions"]["7b-vllm-rerun"]
-    assert plan["stages"] == ["vllm-7b-bf16-cmp", "7b-bf16-cmp", "quality-7b"]
-    assert plan["session_budget_minutes"] == 84 and plan["ledger_refuses_on_the_expected_path"] is None
+    assert plan["stages"] == ["vllm-startup-0.5b", "vllm-7b-bf16-cmp", "7b-bf16-cmp", "quality-7b"]
+    assert plan["session_budget_minutes"] == 97 and plan["ledger_refuses_on_the_expected_path"] is None
     text = SCRIPT.read_text()
     assert [m for m in re.findall(r"^run (\S+)$", text, re.M)] == plan["stages"]
 
 
-DOC = ROOT / "docs" / "v10-7b-results.md"
+DOC = ROOT / "docs" / "v10-vllm-startup-failures.md"
 
 
 @pytest.mark.skipif(not DOC.exists(), reason="the image test job mounts tests, deploy and benchmarks, not docs")

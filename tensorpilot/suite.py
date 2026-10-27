@@ -228,6 +228,11 @@ EXTRA_STAGES = {
     "faults-7b": {"model": "7b", "engine": "faults", "quantization": "none", "dtype": "bfloat16",
                   "expected_minutes": 12, "cap_minutes": 30, "rate": 5, "requests": 900, "kill_after": 25,
                   "what": "the same crash experiment with a 7B reload in the recovery path"},
+    # The early vLLM validation: the benchmark's exact vLLM command on the 0.5B model, plus requests that take the top-k/top-p sampler
+    # path the greedy benchmark skips. It exists because two vLLM stages died in start-up after the 7B download and install were paid for.
+    "vllm-startup-0.5b": {"model": "0.5b", "engine": "vllm", "quantization": "none", "dtype": "bfloat16", "batch_size": 48,
+                          "expected_minutes": 4, "cap_minutes": 12, "check_only": True,
+                          "what": "start vLLM exactly as the benchmark does, on 0.5B, and exercise greedy and top-k/top-p sampling"},
     "probe-0.5b": {"model": "0.5b", "engine": "probe", "quantization": "none", "dtype": "float16", "prefill_pack": 2048,
                    "expected_minutes": 3, "cap_minutes": 12,
                    "what": "explain solo-vs-batched divergence with the model's own top-2 logits (the 31/32 quick-session case)"},
@@ -269,7 +274,7 @@ SESSIONS = {
 # Re-running only what the 7B session lost: the vLLM comparison (its stage failed to start) and the NF4 quality evaluation (skipped).
 # The TensorPilot control repeats the comparison points on the same card as vLLM, so the two engines share a physical GPU and a Pod.
 RERUN_SESSIONS = {
-    "7b-vllm-rerun": {"stages": ["vllm-7b-bf16-cmp", "7b-bf16-cmp", "quality-7b"], "overhead_minutes": 35,
+    "7b-vllm-rerun": {"stages": ["vllm-startup-0.5b", "vllm-7b-bf16-cmp", "7b-bf16-cmp", "quality-7b"], "overhead_minutes": 35,
                       "purpose": "vLLM against TensorPilot on one card at the comparison points, and the 7B NF4 quality evaluation"},
 }
 # Not counted against the $9: only if credits remain after the core sessions. A fresh Pod re-downloads 28 GB and reinstalls vLLM.
@@ -284,8 +289,18 @@ def _stage_minutes(stage):
     return env["V10_EXPECTED_MINUTES"], env["V10_CAP_MINUTES"]
 
 
+def _new_model_flags(stages):
+    """For each stage, whether it is the first in its session to use its model (and so pays that model's download)."""
+    seen, flags = set(), []
+    for stage in stages:
+        key = stage_env(stage)["V10_MODEL_KEY"]
+        flags.append(key not in seen)
+        seen.add(key)
+    return flags
+
+
 def _ledger_minutes(stage, first_in_session):
-    """Expected ledger time for a stage: its experiments plus assumed start-up, plus the download if it is the first stage."""
+    """Expected ledger time for a stage: its experiments plus assumed start-up, plus the download if its model is new to the session."""
     env = stage_env(stage)
     minutes = env["V10_EXPECTED_MINUTES"] + STAGE_STARTUP_MINUTES[env["V10_ENGINE"] if env["V10_ENGINE"] in STAGE_STARTUP_MINUTES
                                                                    else "tensorpilot"]
@@ -310,7 +325,8 @@ def budget_plan(price_per_hour=ASSUMED_PRICE_PER_HOUR, budget_usd=BUDGET_USD, se
         mins = [_stage_minutes(stage) for stage in session["stages"]]
         expected = sum(m[0] for m in mins)
         caps = [m[1] for m in mins]
-        ledger = [_ledger_minutes(stage, i == 0) for i, stage in enumerate(session["stages"])]
+        fresh = _new_model_flags(session["stages"])
+        ledger = [_ledger_minutes(stage, fresh[i]) for i, stage in enumerate(session["stages"])]
         rows[name] = {"stages": list(session["stages"]), "expected_stage_minutes": round(expected, 1),
                       "stage_caps": caps, "overhead_minutes": session["overhead_minutes"], "slack_minutes": SLACK_MINUTES,
                       "expected_ledger_minutes": round(sum(ledger), 1),
@@ -325,8 +341,9 @@ def budget_plan(price_per_hour=ASSUMED_PRICE_PER_HOUR, budget_usd=BUDGET_USD, se
     for r in rows.values():
         r["session_budget_minutes"] = math.floor(r["wanted_budget_minutes"] * scale)
         used, refused = 0.0, None
+        fresh = _new_model_flags(r["stages"])
         for i, (stage, cap) in enumerate(zip(r["stages"], r["stage_caps"])):
-            minutes = _ledger_minutes(stage, i == 0)
+            minutes = _ledger_minutes(stage, fresh[i])
             if PATH_MARGIN * used + cap > r["session_budget_minutes"]:
                 refused = stage
                 break
@@ -369,11 +386,13 @@ def stage_env(stage):
     elif stage in EXTRA_STAGES:
         s = EXTRA_STAGES[stage]
         env = {"V10_ENGINE": s["engine"], "V10_EXECUTION": "batch", "V10_QUANT": s["quantization"],
-               "V10_DTYPE": s["dtype"], "V10_BATCH_SIZE": 32, "V10_QUEUE_SIZE": 128, "V10_MAX_PROMPT_TOKENS": 1024,
+               "V10_DTYPE": s["dtype"], "V10_BATCH_SIZE": s.get("batch_size", 32), "V10_QUEUE_SIZE": 128,
+               "V10_MAX_PROMPT_TOKENS": 1024,
                "V10_CONFIG": "", "V10_CAP_MINUTES": s["cap_minutes"], "V10_EXPECTED_MINUTES": s["expected_minutes"],
                "V10_WHAT": s["what"]}
         env["V10_PREFILL_PACK"] = s.get("prefill_pack", 0)
         env["V10_BACKLOG"] = 128
+        env["V10_CHECK_ONLY"] = 1 if s.get("check_only") else 0
         for key in ("rate", "requests", "kill_after"):
             if key in s:
                 env[f"V10_FAULT_{key.upper()}"] = s[key]
