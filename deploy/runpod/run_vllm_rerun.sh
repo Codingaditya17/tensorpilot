@@ -15,8 +15,8 @@
 # check_toolchain.sh), TENSORPILOT_POD_MAX_MINUTES (165 or more) and TENSORPILOT_RESULTS_ROOT. Nothing else is read.
 set -Eeuo pipefail
 
-# The digest of the published image that carries gcc, libc6-dev and the CUDA_HOME assembly (v1.0.0-rc2-5). The script refuses to run until it is pinned.
-EXPECTED_DIGEST="sha256:UNSET-pin-the-published-rc2-5-digest-here"
+# The digest of the published image that carries gcc, libc6-dev and the CUDA_HOME assembly (v1.0.0-rc2-6). The script refuses to run until it is pinned.
+EXPECTED_DIGEST="sha256:UNSET-pin-the-published-rc2-6-digest-here"
 STAGE="startup"
 trap 'echo >&2; echo "*** STOPPED at: ${STAGE}. Evidence for every stage that ran, including this one, is archived under ${SESSION:-the session directory}." >&2; echo "*** THE POD IS STILL BILLING: copy the evidence, then TERMINATE the Pod." >&2' ERR
 

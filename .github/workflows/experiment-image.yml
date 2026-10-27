@@ -48,7 +48,7 @@ jobs:
         run: |
           docker run --rm --user 0 -v "$PWD/tests:/repo/tests:ro" -v "$PWD/deploy:/repo/deploy:ro" \
             -v "$PWD/benchmarks:/repo/benchmarks:ro" -v "$PWD/requirements-cuda.txt:/repo/requirements-cuda.txt:ro" \
-            -v "$PWD/requirements-vllm.txt:/repo/requirements-vllm.txt:ro" \
+            -v "$PWD/requirements-vllm.txt:/repo/requirements-vllm.txt:ro" -v "$PWD/requirements-vllm.in:/repo/requirements-vllm.in:ro" \
             -w /repo -e PYTHONDONTWRITEBYTECODE=1 \
             --entrypoint bash tensorpilot-exp:ci -c '
               python -m pip install -q "pytest>=8,<10" &&
