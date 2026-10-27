@@ -15,7 +15,7 @@
 set -Eeuo pipefail
 
 # The digest of the published image that carries gcc and libc6-dev (v1.0.0-rc2-4). The script refuses to run until it is pinned.
-EXPECTED_DIGEST="sha256:UNSET-pin-the-published-rc2-4-digest-here"
+EXPECTED_DIGEST="sha256:92721fab66c72deb382cf21248ca19cb43e18dc5147fc9a25deacaddf888612f"
 STAGE="startup"
 trap 'echo >&2; echo "*** STOPPED at: ${STAGE}. Evidence for every stage that ran, including this one, is archived under ${SESSION:-the session directory}." >&2; echo "*** THE POD IS STILL BILLING: copy the evidence, then TERMINATE the Pod." >&2' ERR
 

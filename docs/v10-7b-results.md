@@ -168,7 +168,7 @@ Rerun only what is missing, on a fresh Pod, from a new image that contains the c
 | `quality-7b` | the skipped NF4 vs bf16 evaluation | stage cap 30 min |
 
 At $0.91/h (`python -m tensorpilot.suite --rerun-budget --price-per-hour 0.91`): ledger budget 84 minutes, expected total about 98 minutes ≈ **$1.48**, worst case 134 minutes ≈ **$2.03**,
-against $4.63 for the full 7B chain. Prerequisite: a published image (rc2-4) with `gcc`. This costs no GPU time but needs an explicit approval to publish and push.
+against $4.63 for the full 7B chain. Prerequisite met: rc2-4 (`sha256:92721fab66c72deb382cf21248ca19cb43e18dc5147fc9a25deacaddf888612f`) is published and contains `gcc`.
 
 The control makes the pair acceptable to `5.same-hardware-7b`. Without it, vLLM could only be paired with the archived run from another card, and that item would stay FAIL (different card), as it should.
 
@@ -177,7 +177,7 @@ If the vLLM numbers come back, the `## Why vLLM differs` section of the report m
 
 ### The re-run script (copy of `deploy/runpod/run_vllm_rerun.sh`; a test keeps it identical)
 
-Pin `EXPECTED_DIGEST` to the published rc2-4 digest first. Exports: `TENSORPILOT_API_KEY`, `TENSORPILOT_IMAGE_REF` (ending in that digest), `RUNPOD_POD_ID`, `SESSION_BUDGET_MINUTES=84`,
+The script is pinned to the published rc2-4 digest. Exports: `TENSORPILOT_API_KEY`, `TENSORPILOT_IMAGE_REF` (ending in that digest), `RUNPOD_POD_ID`, `SESSION_BUDGET_MINUTES=84`,
 `PREFILL_PACK_TOKENS=512`; the Pod environment needs `TENSORPILOT_POD_MAX_MINUTES=150`.
 
 ```bash
@@ -198,7 +198,7 @@ Pin `EXPECTED_DIGEST` to the published rc2-4 digest first. Exports: `TENSORPILOT
 set -Eeuo pipefail
 
 # The digest of the published image that carries gcc and libc6-dev (v1.0.0-rc2-4). The script refuses to run until it is pinned.
-EXPECTED_DIGEST="sha256:UNSET-pin-the-published-rc2-4-digest-here"
+EXPECTED_DIGEST="sha256:92721fab66c72deb382cf21248ca19cb43e18dc5147fc9a25deacaddf888612f"
 STAGE="startup"
 trap 'echo >&2; echo "*** STOPPED at: ${STAGE}. Evidence for every stage that ran, including this one, is archived under ${SESSION:-the session directory}." >&2; echo "*** THE POD IS STILL BILLING: copy the evidence, then TERMINATE the Pod." >&2' ERR
 
